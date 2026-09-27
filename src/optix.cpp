@@ -1,3 +1,12 @@
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#endif
+
 #include <rainbow/optix.hpp>
 
 #include <rainbow/cuda_driver.hpp>
@@ -18,9 +27,12 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
-#include <string_view>
+#include <string>
+#include <type_traits>
 #include <vector>
 
 namespace
@@ -389,6 +401,27 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     print_optix_log("program group", log, log_byte_size);
     check_optix(result, "optixProgramGroupCreate", __FILE__, __LINE__);
 
+
+    log.fill('\0');
+    log_byte_size = log.size();
+
+    result = optixProgramGroupCreate(
+        optix_context_,
+        &miss_description,
+        1,
+        &program_group_options,
+        log.data(),
+        &log_byte_size,
+        &miss_program_group_);
+
+    print_optix_log("miss program group", log, log_byte_size);
+
+    check_optix(
+        result,
+        "optixProgramGroupCreate(miss)",
+        __FILE__,
+        __LINE__);
+
     // ----- raygen-only pipeline -----
     OptixPipelineLinkOptions pipeline_link_options = {};
     // M2 は optixTrace() を一度も呼ばないので，許容する trace 深度は 0 にする．
@@ -433,11 +466,21 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     RAINBOW_M2_CUDA_CHECK(cuMemAlloc(
         &device_raygen_record_, sizeof(host_raygen_record_)));
 
+    RAINBOW_M2_CUDA_CHECK(
+    cuMemAlloc(
+        &device_miss_record_,
+        sizeof(host_miss_record_)));
+
     host_params_.output = reinterpret_cast<std::uint32_t*>(device_output_);
     host_params_.count = element_count;
     host_params_.reserved = 0;
     RAINBOW_M2_OPTIX_CHECK(optixSbtRecordPackHeader(
         raygen_program_group_, &host_raygen_record_));
+
+    RAINBOW_M2_OPTIX_CHECK(
+    optixSbtRecordPackHeader(
+        miss_program_group_,
+        &host_miss_record_));
 
     // ----- 同じ stream に初期化・転送・launch を順に投入する． -----
     // CUDA 13.x では pageable host memory を使う Async 転送も扱えるが，
@@ -452,9 +495,22 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     RAINBOW_M2_CUDA_CHECK(cuMemcpyHtoDAsync(
         device_raygen_record_, &host_raygen_record_, sizeof(host_raygen_record_), stream));
 
+    RAINBOW_M2_CUDA_CHECK(
+    cuMemcpyHtoDAsync(
+        device_miss_record_,
+        &host_miss_record_,
+        sizeof(host_miss_record_),
+        stream));
+
     OptixShaderBindingTable sbt = {};
+
     sbt.raygenRecord = device_raygen_record_;
-    // optixTrace() がないため，miss / hitgroup / callable record は不要．
+
+    sbt.missRecordBase = device_miss_record_;
+    sbt.missRecordStrideInBytes =
+        static_cast<unsigned int>(sizeof(MissRecord));
+    sbt.missRecordCount = 1;
+    
     RAINBOW_M2_OPTIX_CHECK(optixLaunch(
         pipeline_, stream, device_params_, sizeof(host_params_), &sbt,
         element_count, 1, 1));
@@ -494,9 +550,15 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
 
 bool OptixSmokeTest::release_resources() noexcept
 {
-    if(optix_context_ == nullptr && module_ == nullptr
-       && raygen_program_group_ == nullptr && pipeline_ == nullptr
-       && device_output_ == 0 && device_params_ == 0 && device_raygen_record_ == 0)
+    if(optix_context_ == nullptr 
+        && module_ == nullptr
+        && raygen_program_group_ == nullptr 
+        && miss_program_group_ == nullptr 
+        && pipeline_ == nullptr
+        && device_output_ == 0 
+        && device_params_ == 0 
+        && device_raygen_record_ == 0
+        && device_miss_record_ == 0)
     {
         return true;
     }
@@ -525,6 +587,14 @@ bool OptixSmokeTest::release_resources() noexcept
             cuMemFree(device_raygen_record_), "cuMemFree(raygen record)") && succeeded;
         device_raygen_record_ = 0;
     }
+    if(device_miss_record_ != 0)
+    {
+        succeeded = report_cleanup_result(
+            cuMemFree(device_miss_record_),
+            "cuMemFree(miss record)") && succeeded;
+
+        device_miss_record_ = 0;
+    }
     if(device_params_ != 0)
     {
         succeeded = report_cleanup_result(
@@ -549,6 +619,14 @@ bool OptixSmokeTest::release_resources() noexcept
             optixProgramGroupDestroy(raygen_program_group_), "optixProgramGroupDestroy")
             && succeeded;
         raygen_program_group_ = nullptr;
+    }
+    if(miss_program_group_ != nullptr)
+    {
+        succeeded = report_cleanup_result(
+            optixProgramGroupDestroy(miss_program_group_),
+            "optixProgramGroupDestroy(miss)") && succeeded;
+
+        miss_program_group_ = nullptr;
     }
     if(module_ != nullptr)
     {

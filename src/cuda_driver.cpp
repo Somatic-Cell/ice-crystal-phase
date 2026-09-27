@@ -3,8 +3,10 @@
 #include <cuda.h>
 
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
