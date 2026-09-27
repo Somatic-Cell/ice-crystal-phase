@@ -252,6 +252,11 @@ struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) RaygenRecord
     char header[OPTIX_SBT_RECORD_HEADER_SIZE];
 };
 
+struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) MissRecord
+{
+    char header[OPTIX_SBT_RECORD_HEADER_SIZE];
+};
+
 static_assert(sizeof(void*) == 8, "This M2 implementation requires a 64-bit build.");
 static_assert(sizeof(CUdeviceptr) == sizeof(void*));
 static_assert(sizeof(unsigned int) == sizeof(std::uint32_t));
@@ -297,16 +302,19 @@ private:
     OptixDeviceContext optix_context_ = nullptr;
     OptixModule module_ = nullptr;
     OptixProgramGroup raygen_program_group_ = nullptr;
+    OptixProgramGroup miss_program_group_ = nullptr;
     OptixPipeline pipeline_ = nullptr;
 
     CUdeviceptr device_output_ = 0;
     CUdeviceptr device_params_ = 0;
     CUdeviceptr device_raygen_record_ = 0;
+    CUdeviceptr device_miss_record_ = 0;
 
     // Async 転送元をローカルな一時変数にせず，所有者のメンバとして保持する．
     // 例外が起きても destructor 本体の同期が終わるまで，転送元は生存している．
     rainbow::TraceLaunchParams host_params_ = {};
     RaygenRecord host_raygen_record_ = {};
+    MissRecord host_miss_record_ = {};
     bool has_pending_work_ = false;
 };
 
@@ -346,6 +354,8 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     pipeline_compile_options.numAttributeValues = 0;
     pipeline_compile_options.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
     pipeline_compile_options.pipelineLaunchParamsVariableName = "params";
+    pipeline_compile_options.pipelineLaunchParamsSizeInBytes =
+    sizeof(rainbow::TraceLaunchParams);
     pipeline_compile_options.usesPrimitiveTypeFlags = OPTIX_PRIMITIVE_TYPE_FLAGS_CUSTOM;
     // 上の graph / primitive flags はコンパイル上の設定で，GAS を作る処理ではない．
 
@@ -362,6 +372,13 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     raygen_description.kind = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
     raygen_description.raygen.module = module_;
     raygen_description.raygen.entryFunctionName = "__raygen__raindrop_trace";
+
+    OptixProgramGroupDesc miss_description = {};
+    miss_description.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
+
+    // M2 では実行する miss shader を指定しない．
+    miss_description.miss.module = nullptr;
+    miss_description.miss.entryFunctionName = nullptr;
 
     OptixProgramGroupOptions program_group_options = {};
     log.fill('\0');
