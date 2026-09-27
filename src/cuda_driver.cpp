@@ -14,77 +14,67 @@
 namespace 
 {
 
-[[noreturn]]
-void throw_cuda_error(
+void check_cuda(
     const CUresult result,
-    const std::string_view expression,
-    const std::string_view file,
+    const char* expression,
+    const char* file,
     const int line)
 {
+    if(result == CUDA_SUCCESS)
+    {
+        return;
+    }
+
     const char* error_name = nullptr;
     const char* error_description = nullptr;
-
-    static_cast<void>(
-        cuGetErrorName(result, &error_name));
-
-    static_cast<void>(
-        cuGetErrorString(result, &error_description));
+    static_cast<void>(cuGetErrorName(result, &error_name));
+    static_cast<void>(cuGetErrorString(result, &error_description));
 
     std::ostringstream message;
-
-    message
-        << expression
-        << " failed at "
-        << file
-        << ':'
-        << line
-        << '\n'
-        << "CUDA error: "
-        << (error_name != nullptr
-                ? error_name
-                : "unknown")
-        << '\n'
-        << "Description: "
-        << (error_description != nullptr
-                ? error_description
-                : "unavailable");
-
+    message << expression << " failed at " << file << ':' << line
+            << "\nCUDA error: "
+            << (error_name != nullptr ? error_name : "unknown")
+            << " (" << static_cast<int>(result) << ')'
+            << "\nDescription: "
+            << (error_description != nullptr ? error_description : "unavailable");
     throw std::runtime_error(message.str());
 }
 
 #define RAINBOW_CUDA_CHECK(expression)                          \
-    do                                                          \
-    {                                                           \
-        const CUresult cuda_result = (expression);              \
-                                                                \
-        if(cuda_result != CUDA_SUCCESS)                         \
-        {                                                       \
-            throw_cuda_error(                                   \
-                cuda_result,                                    \
-                #expression,                                    \
-                __FILE__,                                       \
-                __LINE__);                                      \
-        }                                                       \
-    } while(false)
+    check_cuda((expression), #expression, __FILE__, __LINE__)
 
 
-std::vector<char> read_binary_file(
-    const std::filesystem::path& path)
+// 戻り値を bool にするのは，正常経路では cleanup の失敗もテスト失敗にするため．
+[[nodiscard]]
+bool report_cleanup_result(
+    const CUresult result,
+    const char* expression) noexcept
 {
-    std::ifstream stream(
-        path,
-        std::ios::binary | std::ios::ate);
-
-    if(!stream)
+    if(result == CUDA_SUCCESS)
     {
-        throw std::runtime_error(
-            "Failed to open CUDA module: "
-            + path.string());
+        return true;
     }
 
-    const std::streampos end_position =
-        stream.tellg();
+    const char* error_name = nullptr;
+    static_cast<void>(cuGetErrorName(result, &error_name));
+    std::fprintf(
+        stderr, "[CUDA cleanup] %s: %s (%d)\n",
+        expression,
+        error_name != nullptr ? error_name : "unknown",
+        static_cast<int>(result));
+    return false;
+}
 
+std::vector<char> read_binary_file(const std::filesystem::path& path)
+{
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
+
+    if(!input)
+    {
+        throw std::runtime_error("Failed to open CUDA module: " + path.string());
+    }
+
+    const std::streampos end_position = input.tellg();
     if(end_position == std::streampos(-1)
        || end_position == std::streampos(0))
     {
@@ -93,228 +83,303 @@ std::vector<char> read_binary_file(
             + path.string());
     }
 
-    const auto size =
-        static_cast<std::size_t>(end_position);
-
-    std::vector<char> data(size);
-
-    stream.seekg(0, std::ios::beg);
-
-    if(!stream.read(
-           data.data(),
-           static_cast<std::streamsize>(data.size())))
+    const std::streamoff file_byte_size =
+        static_cast<std::streamoff>(end_position);
+    if(file_byte_size <= 0)
     {
-        throw std::runtime_error(
-            "Failed to read CUDA module: "
-            + path.string());
+        throw std::runtime_error("CUDA Module is empty: " + path.string());
     }
 
-    return data;
+    const auto byte_size = static_cast<std::uintmax_t>(file_byte_size);
+    if(byte_size > static_cast<std::uintmax_t>(
+                       (std::numeric_limits<std::size_t>::max)())
+       || byte_size > static_cast<std::uintmax_t>(
+                          (std::numeric_limits<std::streamsize>::max)()))
+    {
+        throw std::runtime_error("CUDA Module is too large: " + path.string());
+    }
+
+    std::vector<char> bytes(static_cast<std::size_t>(byte_size));
+    input.seekg(0, std::ios::beg);
+    if(!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
+    {
+        throw std::runtime_error("Failed to read CUDA Module: " + path.string());
+    }
+
+    return bytes;
 }
 
-
-struct CudaResources
+class CudaDriverSmokeTest final
 {
-    CUdevice device = 0;
-    CUcontext context = nullptr;
-    CUstream stream = nullptr;
-    CUmodule module = nullptr;
-    CUdeviceptr output = 0;
-
-    bool primary_context_retained = false;
-
-    ~CudaResources() noexcept
+public:
+    explicit CudaDriverSmokeTest(const rainbow::CudaContext& cuda_context) noexcept
+        : cuda_context_(cuda_context)
     {
-        if(context != nullptr)
-        {
-            static_cast<void>(
-                cuCtxSetCurrent(context));
-        }
-
-        if(output != 0)
-        {
-            static_cast<void>(
-                cuMemFree(output));
-        }
-
-        if(module != nullptr)
-        {
-            static_cast<void>(
-                cuModuleUnload(module));
-        }
-
-        if(stream != nullptr)
-        {
-            static_cast<void>(
-                cuStreamDestroy(stream));
-        }
-
-        if(context != nullptr)
-        {
-            static_cast<void>(
-                cuCtxSetCurrent(nullptr));
-        }
-
-        if(primary_context_retained)
-        {
-            static_cast<void>(
-                cuDevicePrimaryCtxRelease(device));
-        }
     }
+
+    ~CudaDriverSmokeTest() noexcept
+    {
+        // 通常経路で解放済みなら何もしない．例外経路では cleanup の安全網になる．
+        static_cast<void>(release_resources());
+    }
+
+    CudaDriverSmokeTest(const CudaDriverSmokeTest&) = delete;
+    CudaDriverSmokeTest& operator=(const CudaDriverSmokeTest&) = delete;
+    CudaDriverSmokeTest(CudaDriverSmokeTest&&) = delete;
+    CudaDriverSmokeTest& operator=(CudaDriverSmokeTest&&) = delete;
+
+    void run(const std::filesystem::path& fatbin_path);
+
+private:
+    [[nodiscard]]
+    bool release_resources() noexcept;
+
+    const rainbow::CudaContext& cuda_context_;
+    CUmodule module_ = nullptr;
+    CUdeviceptr device_output_ = 0;
+    bool has_pending_work_ = false;
 };
 
+void CudaDriverSmokeTest::run(const std::filesystem::path& fatbin_path)
+{
+    cuda_context_.make_current();
+
+    const std::vector<char> fatbin = read_binary_file(fatbin_path);
+    RAINBOW_CUDA_CHECK(cuModuleLoadData(&module_, fatbin.data()));
+
+    // extern "C" とこの名前が一致する必要がある．関数ハンドルは module から借用する．
+    CUfunction function = nullptr;
+    const CUresult lookup_result =
+        cuModuleGetFunction(&function, module_, "write_test_pattern");
+    if(lookup_result == CUDA_ERROR_NOT_FOUND)
+    {
+        std::cerr << "CUDA module: " << fatbin_path
+                  << "\nExpected kernel: write_test_pattern"
+                  << "\nCheck extern \"C\" and rebuild / update the staged .fatbin file.\n";
+    }
+    check_cuda(
+        lookup_result, "cuModuleGetFunction(write_test_pattern)", __FILE__, __LINE__);
+
+    // 既存 M1 と同じ要素数・パターンを維持する．性能を測る benchmark ではない．
+    std::uint32_t element_count = 1024;
+    constexpr std::uint32_t expected_mask = 0x5a5a5a5au;
+    constexpr unsigned int threads_per_block = 256;
+    const unsigned int block_count =
+        element_count / threads_per_block
+        + (element_count % threads_per_block != 0 ? 1u : 0u);
+    const std::size_t output_byte_size =
+        static_cast<std::size_t>(element_count) * sizeof(std::uint32_t);
+
+    static_assert(sizeof(void*) == 8, "This project requires a 64-bit build.");
+    static_assert(sizeof(CUdeviceptr) == sizeof(void*));
+    static_assert(sizeof(unsigned int) == sizeof(std::uint32_t));
+
+    RAINBOW_CUDA_CHECK(cuMemAlloc(&device_output_, output_byte_size));
+    const CUstream stream = cuda_context_.stream();
+
+    // 未書き込みを検出するため，期待値とは異なる 0 で初期化する．
+    // 非同期 API の途中で失敗しても destructor が同期を試みるよう，先にフラグを立てる．
+    has_pending_work_ = true;
+    RAINBOW_CUDA_CHECK(cuMemsetD32Async(device_output_, 0, element_count, stream));
+
+    // Driver API には「引数値を格納したホスト変数のアドレス」を渡す．
+    // device_output_ 自体は GPU アドレス値で，&device_output_ はホスト側の格納場所．
+    // 配列の順序と各引数の型は，write_test_pattern の宣言に一致させる．
+    void* kernel_parameters[] = {&device_output_, &element_count};
+    RAINBOW_CUDA_CHECK(cuLaunchKernel(
+        function,
+        block_count, 1, 1,
+        threads_per_block, 1, 1,
+        0, stream, kernel_parameters, nullptr));
+
+    // launch の受付成功と GPU 実行完了は別．非同期実行のエラーもここで検査する．
+    RAINBOW_CUDA_CHECK(cuStreamSynchronize(stream));
+    has_pending_work_ = false;
+
+    // 明示 stream の完了を待ってから同期コピーする．pinned memory は M1/M2 では不要．
+    std::vector<std::uint32_t> host_output(element_count);
+    RAINBOW_CUDA_CHECK(cuMemcpyDtoH(
+        host_output.data(), device_output_, output_byte_size));
+
+    for(std::uint32_t element_index = 0; element_index < element_count; ++element_index)
+    {
+        const std::uint32_t expected = element_index ^ expected_mask;
+        if(host_output[element_index] != expected)
+        {
+            std::ostringstream message;
+            message << "CUDA output mismatch at index " << element_index
+                    << ": expected " << expected
+                    << ", got " << host_output[element_index]
+                    << "\nCheck the kernel body and the staged .fatbin file.";
+            throw std::runtime_error(message.str());
+        }
+    }
+
+    char device_name[256] = {};
+    RAINBOW_CUDA_CHECK(cuDeviceGetName(
+        device_name, static_cast<int>(sizeof(device_name)), cuda_context_.device()));
+
+    // 借りた context / stream は解放しない．正常経路の cleanup 失敗も隠さない．
+    if(!release_resources())
+    {
+        throw std::runtime_error(
+            "CUDA output passed verification, but resource cleanup failed. See stderr.");
+    }
+
+    std::cout << "CUDA device: " << device_name << '\n'
+              << "CUDA Driver API smoke test: passed\n";
+}
+
+bool CudaDriverSmokeTest::release_resources() noexcept
+{
+    if(module_ == nullptr && device_output_ == 0)
+    {
+        return true;
+    }
+
+    if(!report_cleanup_result(
+           cuCtxSetCurrent(cuda_context_.handle()), "cuCtxSetCurrent(smoke cleanup)"))
+    {
+        // 間違った context のまま解放しない．driver/context 喪失時の復旧は対象外．
+        return false;
+    }
+
+    bool succeeded = true;
+    if(has_pending_work_)
+    {
+        succeeded = report_cleanup_result(
+            cuStreamSynchronize(cuda_context_.stream()), "cuStreamSynchronize(smoke cleanup)")
+            && succeeded;
+        has_pending_work_ = false;
+    }
+
+    // API を && の左に置き，先の失敗で後続 cleanup が短絡評価されないようにする．
+    if(device_output_ != 0)
+    {
+        succeeded = report_cleanup_result(
+            cuMemFree(device_output_), "cuMemFree(smoke output)") && succeeded;
+        device_output_ = 0;
+    }
+    if(module_ != nullptr)
+    {
+        succeeded = report_cleanup_result(
+            cuModuleUnload(module_), "cuModuleUnload(smoke module)") && succeeded;
+        module_ = nullptr;
+    }
+    return succeeded;
+}
 }
 
 
 namespace rainbow
 {
-
-void run_cuda_driver_smoke_test(
-    const std::filesystem::path& fatbin_path)
+CudaContext::CudaContext(
+    const int device_ordinal
+)
 {
-    const std::vector<char> fatbin =
-        read_binary_file(fatbin_path);
-
-    CudaResources resources;
-
+    // 初期化
     RAINBOW_CUDA_CHECK(
-        cuInit(0));
+        cuInit(0)
+    );
 
+    // 入力値が不正でないかどうか確認
     int device_count = 0;
 
     RAINBOW_CUDA_CHECK(
-        cuDeviceGetCount(&device_count));
+        cuDeviceGetCount(&device_count)
+    );
 
-    if(device_count <= 0)
+    if(device_ordinal < 0 || device_ordinal >= device_count)
     {
         throw std::runtime_error(
-            "No CUDA-capable device was found.");
+            "Invarid CUDA device ordinal."
+        );
     }
 
     RAINBOW_CUDA_CHECK(
         cuDeviceGet(
-            &resources.device,
-            0));
-
-    char device_name[256] = {};
-
-    RAINBOW_CUDA_CHECK(
-        cuDeviceGetName(
-            device_name,
-            static_cast<int>(sizeof(device_name)),
-            resources.device));
+            &device_,
+            device_ordinal
+        )
+    );
 
     RAINBOW_CUDA_CHECK(
         cuDevicePrimaryCtxRetain(
-            &resources.context,
-            resources.device));
+            &context_,
+            device_
+        )
+    );
 
-    resources.primary_context_retained = true;
+    primary_context_retained_ = true;
 
-    RAINBOW_CUDA_CHECK(
-        cuCtxSetCurrent(resources.context));
+    // リソースを順番に確保する．失敗したら開放し，各メンバ変数を再初期化する．
+    try{
+        RAINBOW_CUDA_CHECK(cuCtxSetCurrent(context_));
 
-    RAINBOW_CUDA_CHECK(
-        cuStreamCreate(
-            &resources.stream,
-            CU_STREAM_NON_BLOCKING));
-
-    RAINBOW_CUDA_CHECK(
-        cuModuleLoadData(
-            &resources.module,
-            fatbin.data()));
-
-    CUfunction function = nullptr;
-
-    RAINBOW_CUDA_CHECK(
-        cuModuleGetFunction(
-            &function,
-            resources.module,
-            "write_test_pattern"));
-
-    std::uint32_t count = 1024;
-
-    constexpr unsigned int block_size = 256;
-
-    const unsigned int grid_size =
-        (count + block_size - 1)
-        / block_size;
-
-    const std::size_t byte_size =
-        static_cast<std::size_t>(count)
-        * sizeof(std::uint32_t);
-
-    RAINBOW_CUDA_CHECK(
-        cuMemAlloc(
-            &resources.output,
-            byte_size));
-
-    void* kernel_parameters[] =
+        RAINBOW_CUDA_CHECK(cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING));
+    }
+    catch(...)
     {
-        &resources.output,
-        &count
-    };
-
-    RAINBOW_CUDA_CHECK(
-        cuLaunchKernel(
-            function,
-            grid_size,
-            1,
-            1,
-            block_size,
-            1,
-            1,
-            0,
-            resources.stream,
-            kernel_parameters,
-            nullptr));
-
-    RAINBOW_CUDA_CHECK(
-        cuStreamSynchronize(
-            resources.stream));
-
-    std::vector<std::uint32_t> output(count);
-
-    RAINBOW_CUDA_CHECK(
-        cuMemcpyDtoH(
-            output.data(),
-            resources.output,
-            byte_size));
-
-    for(std::uint32_t index = 0;
-        index < count;
-        ++index)
-    {
-        const std::uint32_t expected =
-            index ^ 0x5a5a5a5au;
-
-        if(output[index] != expected)
+        if(context_ != nullptr)
         {
-            std::ostringstream message;
-
-            message
-                << "CUDA output mismatch at index "
-                << index
-                << ": expected "
-                << expected
-                << ", got "
-                << output[index];
-
-            throw std::runtime_error(
-                message.str());
+            static_cast<void>(
+                cuCtxSetCurrent(nullptr)
+            );
         }
+        if(primary_context_retained_)
+        {
+            static_cast<void>(
+                cuDevicePrimaryCtxRelease(device_)
+            );
+        }
+
+        context_ = nullptr;
+        primary_context_retained_ = false;
+
+        throw;
+    }
+}
+
+CudaContext::~CudaContext() noexcept
+{
+    if(context_ != nullptr)
+    {
+        static_cast<void>(cuCtxSetCurrent(context_)); // [[nodiscard]] の警告を出させないで設定
     }
 
-    std::cout
-        << "CUDA device: "
-        << device_name
-        << '\n';
+    if(stream_ != nullptr)
+    {
+        static_cast<void>(cuStreamSynchronize(stream_));
+        static_cast<void>(cuStreamDestroy(stream_));
+    }
 
-    std::cout
-        << "CUDA Driver API smoke test: passed"
-        << '\n';
+    if(context_ != nullptr)
+    {
+        static_cast<void>(cuCtxSetCurrent(nullptr));
+    }
+
+    if(primary_context_retained_)
+    {
+        static_cast<void>(cuDevicePrimaryCtxRelease(device_));
+    }
 }
 
+void CudaContext::make_current() const
+{
+    RAINBOW_CUDA_CHECK(
+        cuCtxSetCurrent(context_)
+    );
 }
+
+
+void run_cuda_driver_smoke_test(
+    const CudaContext& cuda_context,
+    const std::filesystem::path& fatbin_path)
+{
+    CudaDriverSmokeTest smoke_test(cuda_context);
+    smoke_test.run(fatbin_path);
+}
+
+} // namespace rainbow
 
 #undef RAINBOW_CUDA_CHECK

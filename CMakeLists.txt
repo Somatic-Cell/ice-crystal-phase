@@ -213,10 +213,17 @@ add_custom_command(
         ${CMAKE_COMMAND} -E make_directory
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/modules"
     
+    # CUDA モジュールのコピー
     COMMAND
         "${CMAKE_COMMAND}" -E copy_if_different
         "$<TARGET_OBJECTS:rainbow_patch_build_module>"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/modules/patch_build.fatbin"
+    
+    # OptiX モジュールのコピー
+    COMMAND
+        "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_OBJECTS:rainbow_raindrop_trace_module>"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/modules/raindrop_trace.optixir"
 
     COMMAND_EXPAND_LISTS
     VERBATIM
