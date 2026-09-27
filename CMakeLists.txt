@@ -205,9 +205,8 @@ add_dependencies(
     rainbow_patch_query_module
 )
 
-add_custom_command(
-    TARGET ${PROJECT_NAME}
-    POST_BUILD
+add_custom_target(
+    rainbow_stage_modules
 
     COMMAND
         ${CMAKE_COMMAND} -E make_directory
@@ -227,6 +226,19 @@ add_custom_command(
 
     COMMAND_EXPAND_LISTS
     VERBATIM
+)
+
+# コピー前に，コピー元の module を生成する．
+add_dependencies(
+    rainbow_stage_modules
+    rainbow_patch_build_module
+    rainbow_raindrop_trace_module
+)
+
+# Rainbow をビルドするとき，module の配置も確認する．
+add_dependencies(
+    Rainbow
+    rainbow_stage_modules
 )
 
 
