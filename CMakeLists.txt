@@ -288,4 +288,5 @@ if(BUILD_TESTING)
         PROPERTIES
             LABELS "gpu;cuda;optix"
     )
+    add_subdirectory(tests)
 endif()
