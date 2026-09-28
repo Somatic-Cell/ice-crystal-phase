@@ -1,115 +1,19 @@
 #include <rainbow/cuda_driver.hpp>
+#include <rainbow/cuda_error.hpp>
+#include <rainbow/read_binary_file.hpp>
 
 #include <cuda.h>
 
 #include <cstddef>
-#include <cstdio>
 #include <cstdint>
-#include <fstream>
-#include <limits>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
-#include <string_view>
 #include <vector>
 
 namespace 
 {
 
-void check_cuda(
-    const CUresult result,
-    const char* expression,
-    const char* file,
-    const int line)
-{
-    if(result == CUDA_SUCCESS)
-    {
-        return;
-    }
-
-    const char* error_name = nullptr;
-    const char* error_description = nullptr;
-    static_cast<void>(cuGetErrorName(result, &error_name));
-    static_cast<void>(cuGetErrorString(result, &error_description));
-
-    std::ostringstream message;
-    message << expression << " failed at " << file << ':' << line
-            << "\nCUDA error: "
-            << (error_name != nullptr ? error_name : "unknown")
-            << " (" << static_cast<int>(result) << ')'
-            << "\nDescription: "
-            << (error_description != nullptr ? error_description : "unavailable");
-    throw std::runtime_error(message.str());
-}
-
-#define RAINBOW_CUDA_CHECK(expression)                          \
-    check_cuda((expression), #expression, __FILE__, __LINE__)
-
-
-// 戻り値を bool にするのは，正常経路では cleanup の失敗もテスト失敗にするため．
-[[nodiscard]]
-bool report_cleanup_result(
-    const CUresult result,
-    const char* expression) noexcept
-{
-    if(result == CUDA_SUCCESS)
-    {
-        return true;
-    }
-
-    const char* error_name = nullptr;
-    static_cast<void>(cuGetErrorName(result, &error_name));
-    std::fprintf(
-        stderr, "[CUDA cleanup] %s: %s (%d)\n",
-        expression,
-        error_name != nullptr ? error_name : "unknown",
-        static_cast<int>(result));
-    return false;
-}
-
-std::vector<char> read_binary_file(const std::filesystem::path& path)
-{
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-
-    if(!input)
-    {
-        throw std::runtime_error("Failed to open CUDA module: " + path.string());
-    }
-
-    const std::streampos end_position = input.tellg();
-    if(end_position == std::streampos(-1)
-       || end_position == std::streampos(0))
-    {
-        throw std::runtime_error(
-            "CUDA module is empty or unreadable: "
-            + path.string());
-    }
-
-    const std::streamoff file_byte_size =
-        static_cast<std::streamoff>(end_position);
-    if(file_byte_size <= 0)
-    {
-        throw std::runtime_error("CUDA Module is empty: " + path.string());
-    }
-
-    const auto byte_size = static_cast<std::uintmax_t>(file_byte_size);
-    if(byte_size > static_cast<std::uintmax_t>(
-                       (std::numeric_limits<std::size_t>::max)())
-       || byte_size > static_cast<std::uintmax_t>(
-                          (std::numeric_limits<std::streamsize>::max)()))
-    {
-        throw std::runtime_error("CUDA Module is too large: " + path.string());
-    }
-
-    std::vector<char> bytes(static_cast<std::size_t>(byte_size));
-    input.seekg(0, std::ios::beg);
-    if(!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
-    {
-        throw std::runtime_error("Failed to read CUDA Module: " + path.string());
-    }
-
-    return bytes;
-}
 
 class CudaDriverSmokeTest final
 {
@@ -121,7 +25,7 @@ public:
 
     ~CudaDriverSmokeTest() noexcept
     {
-        // 通常経路で解放済みなら何もしない．例外経路では cleanup の安全網になる．
+        // 通常経路で解放済みなら何もしないが，例外経路では cleanup の安全網になる
         static_cast<void>(release_resources());
     }
 
@@ -146,7 +50,7 @@ void CudaDriverSmokeTest::run(const std::filesystem::path& fatbin_path)
 {
     cuda_context_.make_current();
 
-    const std::vector<char> fatbin = read_binary_file(fatbin_path);
+    const std::vector<char> fatbin = rainbow::read_binary_file(fatbin_path);
     RAINBOW_CUDA_CHECK(cuModuleLoadData(&module_, fatbin.data()));
 
     // extern "C" とこの名前が一致する必要がある．関数ハンドルは module から借用する．
@@ -159,7 +63,7 @@ void CudaDriverSmokeTest::run(const std::filesystem::path& fatbin_path)
                   << "\nExpected kernel: write_test_pattern"
                   << "\nCheck extern \"C\" and rebuild / update the staged .fatbin file.\n";
     }
-    check_cuda(
+    rainbow::detail::check_cuda(
         lookup_result, "cuModuleGetFunction(write_test_pattern)", __FILE__, __LINE__);
 
     // 既存 M1 と同じ要素数・パターンを維持する．性能を測る benchmark ではない．
@@ -239,7 +143,7 @@ bool CudaDriverSmokeTest::release_resources() noexcept
         return true;
     }
 
-    if(!report_cleanup_result(
+    if(!rainbow::detail::report_cuda_cleanup_result(
            cuCtxSetCurrent(cuda_context_.handle()), "cuCtxSetCurrent(smoke cleanup)"))
     {
         // 間違った context のまま解放しない．driver/context 喪失時の復旧は対象外．
@@ -249,7 +153,7 @@ bool CudaDriverSmokeTest::release_resources() noexcept
     bool succeeded = true;
     if(has_pending_work_)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuStreamSynchronize(cuda_context_.stream()), "cuStreamSynchronize(smoke cleanup)")
             && succeeded;
         has_pending_work_ = false;
@@ -258,13 +162,13 @@ bool CudaDriverSmokeTest::release_resources() noexcept
     // API を && の左に置き，先の失敗で後続 cleanup が短絡評価されないようにする．
     if(device_output_ != 0)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuMemFree(device_output_), "cuMemFree(smoke output)") && succeeded;
         device_output_ = 0;
     }
     if(module_ != nullptr)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuModuleUnload(module_), "cuModuleUnload(smoke module)") && succeeded;
         module_ = nullptr;
     }

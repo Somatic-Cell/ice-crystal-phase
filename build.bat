@@ -1,6 +1,7 @@
 rmdir /S build
 mkdir build
 cd build
-cmake .. 
-cmake --build . --config Release --verbose
+cmake .. -DBUILD_TESTING=ON
+cmake --build . --config Debug --verbose
+ctest --test-dir . -C Debug --output-on-failure --no-tests=error
 cd ..

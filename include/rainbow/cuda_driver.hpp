@@ -6,7 +6,6 @@
 namespace rainbow
 {
 
-// MEMO: このプロジェクトでは，所有権や不変条件をもつ型は class として実装する
 
 // CUDA Driver API と OptiX が共有する実行環境を管理する RAII クラス
 // 指定された CUDA device の primary context に対する retain の参照を１つ保持し，

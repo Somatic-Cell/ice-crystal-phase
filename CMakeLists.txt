@@ -66,6 +66,14 @@ add_executable(
     src/patch_accel.cpp 
 )
 
+target_sources(
+    ${PROJECT_NAME}
+    PRIVATE
+        src/cuda_error.cpp
+        src/optix_error.cpp 
+        src/read_binary_file.cpp
+)
+
 # JP: インクルードパスの追加
 target_include_directories(
     ${PROJECT_NAME} 
@@ -258,3 +266,25 @@ message(STATUS "CMAKE_INSTALL_LIBDIR = ${CMAKE_INSTALL_LIBDIR}")
 message(STATUS "OPTIX = ${optix_LIBRARY}")
 
 message(STATUS "CUDA_ARCHITECTURES = ${CMAKE_CUDA_ARCHITECTURES}")
+
+# -----------------------------------------------------------------------------
+# Regression test registration (existing M1 / M2)
+# -----------------------------------------------------------------------------
+include(CTest)
+
+if(BUILD_TESTING)
+    # Rainbow は add_executable() で定義済みの target 名．
+    # CMake が，選択した構成 (Debug / Release) の実行ファイルパスへ解決する．
+    # 引数を渡さず，既存 main.cpp の「.exe の隣の modules/」を使用する．
+    add_test(
+        NAME rainbow_gpu_smoke
+        COMMAND Rainbow
+    )
+
+    # ラベルはテストを分類・選択するためのもの．GPU の自動検出や確保は行わない．
+    set_tests_properties(
+        rainbow_gpu_smoke
+        PROPERTIES
+            LABELS "gpu;cuda;optix"
+    )
+endif()

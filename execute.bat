@@ -1,1 +1,1 @@
-.\build\Release\Rainbow.exe
+.\build\Debug\Rainbow.exe

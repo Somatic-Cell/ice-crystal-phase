@@ -11,6 +11,9 @@
 
 #include <rainbow/cuda_driver.hpp>
 #include <rainbow/trace_launch_params.hpp>
+#include <rainbow/cuda_error.hpp>
+#include <rainbow/optix_error.hpp>
+#include <rainbow/read_binary_file.hpp>
 
 #include <cuda.h>
 #include <optix.h>
@@ -25,183 +28,15 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
-#include <limits>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
-#include <string>
 #include <type_traits>
 #include <vector>
 
 namespace
 {
-
-// エラー処理
-// 通常処理: 戻り値を検査し， API名，ファイル，行番号を付けた例外を出す
-// 廃棄処理: 元の例外を上書きしないため， stderr への記録にとどめる
-void check_cuda(
-    const CUresult result,
-    const char* expression,
-    const char* file,
-    const int line)
-{
-    if(result == CUDA_SUCCESS)
-    {
-        return;
-    }
-
-    const char* error_name = nullptr;
-    const char* error_description = nullptr;
-    static_cast<void>(cuGetErrorName(result, &error_name));
-    static_cast<void>(cuGetErrorString(result, &error_description));
-
-    std::ostringstream message;
-
-    message 
-        << expression
-        << " failed at "
-        << file 
-        << " : "
-        << line
-        << "\n"
-        << "CUDA Error: "
-        <<  (error_name != nullptr ? error_name : "unknown")
-        << " (" << static_cast<int>(result) << ")"
-        << "\n"
-        << "Description: "
-        << (error_description != nullptr ? error_description : "unavailable");
-    throw std::runtime_error(message.str());
-}
-
-void check_optix(
-    const OptixResult result,
-    const char* expression,
-    const char* file,
-    const int line)
-{
-    if(result == OPTIX_SUCCESS)
-    {
-        return;
-    }
-
-    // optix_stubs.h は，optixInit() の失敗時にもエラー名を取得できる実装になっている
-    const char* error_name = optixGetErrorName(result);
-    const char* error_description = optixGetErrorString(result);
-    
-    std::ostringstream message;
-    message
-        << expression
-        << " failed at "
-        << file
-        << ':'
-        << line
-        << '\n'
-        << "OptiX error: "
-        << (error_name != nullptr ? error_name : "unknown")
-        << " (" << static_cast<int>(result) << ")"
-        << '\n'
-        << "Description: "
-        << (error_description != nullptr ? error_description : "unavailable");
-    throw std::runtime_error(message.str());
-}
-
-#define RAINBOW_M2_CUDA_CHECK(expression) \
-    check_cuda((expression), #expression, __FILE__, __LINE__)
-
-#define RAINBOW_M2_OPTIX_CHECK(expression)                         \
-    check_optix((expression), #expression, __FILE__, __LINE__)
-
-
-[[nodiscard]]
-bool report_cleanup_result(
-    const CUresult result,
-    const char* expression) noexcept
-{
-    if(result == CUDA_SUCCESS)
-    {
-        return true;
-    }
-
-    const char* error_name = nullptr;
-    static_cast<void>(cuGetErrorName(result, &error_name));
-    std::fprintf(
-        stderr, "[CUDA cleanup] %s: %s: (%d)\n",
-        expression,
-        error_name!= nullptr ? error_name : "unknown",
-        static_cast<int>(result)
-    );
-    return false;
-}
-
-[[nodiscard]]
-bool report_cleanup_result(
-    const OptixResult result,
-    const char* expression) noexcept
-{
-    if(result == OPTIX_SUCCESS)
-    {
-        return true;
-    }
-
-    const char* error_name = optixGetErrorName(result);
-    std::fprintf(
-        stderr, "[OptiX cleanup] %s: %s: (%d)\n",
-        expression,
-        error_name != nullptr ? error_name : "unknown",
-        static_cast<int>(result)
-    );
-    return false;
-}
-
-// -------------------------
-// バイナリファイルを std::vector<char> に読み込んで返す
-// -------------------------
-[[nodiscard]]
-std::vector<char> read_binary_file(const std::filesystem::path& path)
-{
-    // ファイルの末尾を調べたいため
-    std::ifstream input(path, std::ios::binary | std::ios::ate);
-    if(!input)
-    {
-        throw std::runtime_error("Failed to open Optix IR: " + path.string());
-    }
-
-    const std::streampos end_position = input.tellg();
-    if(end_position == std::streampos(-1))
-    {
-        throw std::runtime_error("Failed to read OptiX IR size: " + path.string());
-    }
-    
-    // 空のファイルは拒否
-    const std::streamoff file_byte_size =
-        static_cast<std::streamoff>(end_position);
-    if(file_byte_size <= 0)
-    {
-        throw std::runtime_error("OptiX IR is empty: " + path.string());
-    }
-
-    // std::uintmax_t で表現しきれないサイズも拒否
-    const std::uintmax_t byte_size = static_cast<std::uintmax_t>(file_byte_size);
-    if(
-        byte_size > static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())
-        || byte_size > static_cast<std::uintmax_t>(std::numeric_limits<std::streamsize>::max())
-    )
-    {
-        throw std::runtime_error("Optix IR is too large: " + path.string());
-    }
-
-    // 先頭から byte_size 分のデータを読む
-    std::vector<char> bytes(static_cast<std::size_t>(byte_size));
-    input.seekg(0, std::ios::beg);
-    if(!input.read(bytes.data(), static_cast<std::streamsize>(bytes.size())))
-    {
-        throw std::runtime_error("Failed to read OptiX IR: " + path.string());
-    }
-
-    return bytes;
-}
 
 
 void optix_log_callback(
@@ -251,7 +86,7 @@ void initialize_optix()
     static std::once_flag initialization_flag;
     std::call_once(initialization_flag, []
     {
-        RAINBOW_M2_OPTIX_CHECK(optixInit());
+        RAINBOW_OPTIX_CHECK(optixInit());
     });
 }
 
@@ -339,7 +174,7 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
             "M2 requires a valid CudaContext and an explicitly created CUDA stream.");
     }
 
-    const std::vector<char> optixir = read_binary_file(optixir_path);
+    const std::vector<char> optixir = rainbow::read_binary_file(optixir_path);
     initialize_optix();
 
     // ----- OptiX device context: CUDA context は新規作成しない． -----
@@ -349,7 +184,7 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
 #ifndef NDEBUG
     context_options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
 #endif
-    RAINBOW_M2_OPTIX_CHECK(optixDeviceContextCreate(
+    RAINBOW_OPTIX_CHECK(optixDeviceContextCreate(
         cuda_context_.handle(), &context_options, &optix_context_));
 
     // ----- IR -> module -----
@@ -377,7 +212,7 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
         optix_context_, &module_options, &pipeline_compile_options,
         optixir.data(), optixir.size(), log.data(), &log_byte_size, &module_);
     print_optix_log("module", log, log_byte_size);
-    check_optix(result, "optixModuleCreate", __FILE__, __LINE__);
+    rainbow::detail::check_optix(result, "optixModuleCreate", __FILE__, __LINE__);
 
     // ----- module 内の raygen を program group として指定する． -----
     OptixProgramGroupDesc raygen_description = {};
@@ -399,7 +234,7 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
         optix_context_, &raygen_description, 1, &program_group_options,
         log.data(), &log_byte_size, &raygen_program_group_);
     print_optix_log("program group", log, log_byte_size);
-    check_optix(result, "optixProgramGroupCreate", __FILE__, __LINE__);
+    rainbow::detail::check_optix(result, "optixProgramGroupCreate", __FILE__, __LINE__);
 
 
     log.fill('\0');
@@ -416,7 +251,7 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
 
     print_optix_log("miss program group", log, log_byte_size);
 
-    check_optix(
+    rainbow::detail::check_optix(
         result,
         "optixProgramGroupCreate(miss)",
         __FILE__,
@@ -434,24 +269,24 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
         optix_context_, &pipeline_compile_options, &pipeline_link_options,
         &raygen_program_group_, 1, log.data(), &log_byte_size, &pipeline_);
     print_optix_log("pipeline", log, log_byte_size);
-    check_optix(result, "optixPipelineCreate", __FILE__, __LINE__);
+    rainbow::detail::check_optix(result, "optixPipelineCreate", __FILE__, __LINE__);
 
     // ----- 必要 stack size を program group の情報から求める． -----
     OptixStackSizes stack_sizes = {};
-    RAINBOW_M2_OPTIX_CHECK(optixUtilAccumulateStackSizes(
+    RAINBOW_OPTIX_CHECK(optixUtilAccumulateStackSizes(
         raygen_program_group_, &stack_sizes, pipeline_));
 
     unsigned int direct_callable_from_traversal = 0;
     unsigned int direct_callable_from_state = 0;
     unsigned int continuation_stack_byte_size = 0;
-    RAINBOW_M2_OPTIX_CHECK(optixUtilComputeStackSizes(
+    RAINBOW_OPTIX_CHECK(optixUtilComputeStackSizes(
         &stack_sizes, pipeline_link_options.maxTraceDepth, 0, 0,
         &direct_callable_from_traversal, &direct_callable_from_state,
         &continuation_stack_byte_size));
 
     // 最後の 1 は traversable graph depth の上限で，trace 再帰深度とは別物．
     // M2 では traversable を使わないが，設定上は single GAS の上限に合わせる．
-    RAINBOW_M2_OPTIX_CHECK(optixPipelineSetStackSize(
+    RAINBOW_OPTIX_CHECK(optixPipelineSetStackSize(
         pipeline_, direct_callable_from_traversal, direct_callable_from_state,
         continuation_stack_byte_size, 1));
 
@@ -461,12 +296,12 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     const std::size_t output_byte_size =
         static_cast<std::size_t>(element_count) * sizeof(std::uint32_t);
 
-    RAINBOW_M2_CUDA_CHECK(cuMemAlloc(&device_output_, output_byte_size));
-    RAINBOW_M2_CUDA_CHECK(cuMemAlloc(&device_params_, sizeof(host_params_)));
-    RAINBOW_M2_CUDA_CHECK(cuMemAlloc(
+    RAINBOW_CUDA_CHECK(cuMemAlloc(&device_output_, output_byte_size));
+    RAINBOW_CUDA_CHECK(cuMemAlloc(&device_params_, sizeof(host_params_)));
+    RAINBOW_CUDA_CHECK(cuMemAlloc(
         &device_raygen_record_, sizeof(host_raygen_record_)));
 
-    RAINBOW_M2_CUDA_CHECK(
+    RAINBOW_CUDA_CHECK(
     cuMemAlloc(
         &device_miss_record_,
         sizeof(host_miss_record_)));
@@ -474,10 +309,10 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     host_params_.output = reinterpret_cast<std::uint32_t*>(device_output_);
     host_params_.count = element_count;
     host_params_.reserved = 0;
-    RAINBOW_M2_OPTIX_CHECK(optixSbtRecordPackHeader(
+    RAINBOW_OPTIX_CHECK(optixSbtRecordPackHeader(
         raygen_program_group_, &host_raygen_record_));
 
-    RAINBOW_M2_OPTIX_CHECK(
+    RAINBOW_OPTIX_CHECK(
     optixSbtRecordPackHeader(
         miss_program_group_,
         &host_miss_record_));
@@ -488,14 +323,14 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     // 必要になれば pinned staging buffer へ変更する．現在も転送元の寿命は保持する．
     const CUstream stream = cuda_context_.stream();
     has_pending_work_ = true;
-    RAINBOW_M2_CUDA_CHECK(cuMemsetD32Async(
+    RAINBOW_CUDA_CHECK(cuMemsetD32Async(
         device_output_, 0, element_count, stream));
-    RAINBOW_M2_CUDA_CHECK(cuMemcpyHtoDAsync(
+    RAINBOW_CUDA_CHECK(cuMemcpyHtoDAsync(
         device_params_, &host_params_, sizeof(host_params_), stream));
-    RAINBOW_M2_CUDA_CHECK(cuMemcpyHtoDAsync(
+    RAINBOW_CUDA_CHECK(cuMemcpyHtoDAsync(
         device_raygen_record_, &host_raygen_record_, sizeof(host_raygen_record_), stream));
 
-    RAINBOW_M2_CUDA_CHECK(
+    RAINBOW_CUDA_CHECK(
     cuMemcpyHtoDAsync(
         device_miss_record_,
         &host_miss_record_,
@@ -511,17 +346,17 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
         static_cast<unsigned int>(sizeof(MissRecord));
     sbt.missRecordCount = 1;
     
-    RAINBOW_M2_OPTIX_CHECK(optixLaunch(
+    RAINBOW_OPTIX_CHECK(optixLaunch(
         pipeline_, stream, device_params_, sizeof(host_params_), &sbt,
         element_count, 1, 1));
 
     // launch 自体の成功と，GPU 上での実行完了は別なので，ここでも戻り値を検査する．
-    RAINBOW_M2_CUDA_CHECK(cuStreamSynchronize(stream));
+    RAINBOW_CUDA_CHECK(cuStreamSynchronize(stream));
     has_pending_work_ = false;
 
     // GPU 書き込み完了後に，同期コピーで通常のホストメモリへ読み戻す．
     std::vector<std::uint32_t> host_output(element_count);
-    RAINBOW_M2_CUDA_CHECK(cuMemcpyDtoH(
+    RAINBOW_CUDA_CHECK(cuMemcpyDtoH(
         host_output.data(), device_output_, output_byte_size));
 
     for(std::uint32_t element_index = 0; element_index < element_count; ++element_index)
@@ -564,7 +399,7 @@ bool OptixSmokeTest::release_resources() noexcept
     }
 
     // 借りた context を current にするが，所有者の stream / retain 参照は解放しない．
-    if(!report_cleanup_result(
+    if(!rainbow::detail::report_cuda_cleanup_result(
            cuCtxSetCurrent(cuda_context_.handle()), "cuCtxSetCurrent"))
     {
         // 異なる context のままハンドルを解放してはいけない．
@@ -575,7 +410,7 @@ bool OptixSmokeTest::release_resources() noexcept
     bool succeeded = true;
     if(has_pending_work_)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuStreamSynchronize(cuda_context_.stream()), "cuStreamSynchronize") && succeeded;
         has_pending_work_ = false;
     }
@@ -583,13 +418,13 @@ bool OptixSmokeTest::release_resources() noexcept
     // 短絡評価で後続 cleanup を飛ばさないよう，API 呼び出しを && の左側に置く．
     if(device_raygen_record_ != 0)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuMemFree(device_raygen_record_), "cuMemFree(raygen record)") && succeeded;
         device_raygen_record_ = 0;
     }
     if(device_miss_record_ != 0)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuMemFree(device_miss_record_),
             "cuMemFree(miss record)") && succeeded;
 
@@ -597,32 +432,32 @@ bool OptixSmokeTest::release_resources() noexcept
     }
     if(device_params_ != 0)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuMemFree(device_params_), "cuMemFree(launch params)") && succeeded;
         device_params_ = 0;
     }
     if(device_output_ != 0)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_cuda_cleanup_result(
             cuMemFree(device_output_), "cuMemFree(output)") && succeeded;
         device_output_ = 0;
     }
     if(pipeline_ != nullptr)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_optix_cleanup_result(
             optixPipelineDestroy(pipeline_), "optixPipelineDestroy") && succeeded;
         pipeline_ = nullptr;
     }
     if(raygen_program_group_ != nullptr)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_optix_cleanup_result(
             optixProgramGroupDestroy(raygen_program_group_), "optixProgramGroupDestroy")
             && succeeded;
         raygen_program_group_ = nullptr;
     }
     if(miss_program_group_ != nullptr)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_optix_cleanup_result(
             optixProgramGroupDestroy(miss_program_group_),
             "optixProgramGroupDestroy(miss)") && succeeded;
 
@@ -630,13 +465,13 @@ bool OptixSmokeTest::release_resources() noexcept
     }
     if(module_ != nullptr)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_optix_cleanup_result(
             optixModuleDestroy(module_), "optixModuleDestroy") && succeeded;
         module_ = nullptr;
     }
     if(optix_context_ != nullptr)
     {
-        succeeded = report_cleanup_result(
+        succeeded = rainbow::detail::report_optix_cleanup_result(
             optixDeviceContextDestroy(optix_context_), "optixDeviceContextDestroy") && succeeded;
         optix_context_ = nullptr;
     }
