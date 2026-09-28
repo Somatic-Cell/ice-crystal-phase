@@ -54,6 +54,14 @@ find_package(CUDAToolkit 13.0 REQUIRED)
 find_package(OptiX91 REQUIRED)
 
 
+if(MSVC)
+    set(
+        CMAKE_MSVC_RUNTIME_LIBRARY
+        "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+    )
+endif()
+
+
 # -----------------------------------------------------
 # JP: 実行ファイルの定義
 # -----------------------------------------------------
@@ -187,6 +195,7 @@ target_include_directories(
         "${OPTIX91_INCLUDE_DIR}"
 )
 
+include("${PROJECT_SOURCE_DIR}/cmake/raindrop_trace.cmake")
 # -----------------------------------------------------------------------------
 # Build ordering
 # -----------------------------------------------------------------------------
@@ -232,6 +241,10 @@ add_custom_target(
         "${CMAKE_COMMAND}" -E copy_if_different
         "$<TARGET_OBJECTS:rainbow_raindrop_trace_module>"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/modules/raindrop_trace.optixir"
+    COMMAND
+        "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_OBJECTS:rainbow_optix_smoke_module>"
+        "$<TARGET_FILE_DIR:Rainbow>/modules/optix_smoke.optixir"
 
     COMMAND_EXPAND_LISTS
     VERBATIM
@@ -247,6 +260,16 @@ add_dependencies(
 # Rainbow をビルドするとき，module の配置も確認する．
 add_dependencies(
     Rainbow
+    rainbow_stage_modules
+)
+
+add_dependencies(
+    rainbow_stage_modules
+    rainbow_optix_smoke_module
+)
+
+add_dependencies(
+    rainbow_trace
     rainbow_stage_modules
 )
 

@@ -19,7 +19,7 @@
 #include <cuda.h>
 #include <optix.h>
 
-#include <optix_function_table_definition.h>
+#include <rainbow/optix_context.hpp>
 #include <optix_stack_size.h>
 #include <optix_stubs.h>
 
@@ -85,11 +85,7 @@ void print_optix_log(
 
 void initialize_optix()
 {
-    static std::once_flag initialization_flag;
-    std::call_once(initialization_flag, []
-    {
-        RAINBOW_OPTIX_CHECK(optixInit());
-    });
+    rainbow::OptixContext::initialize_runtime();
 }
 
 // -----------------------

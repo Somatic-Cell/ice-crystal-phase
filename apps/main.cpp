@@ -87,7 +87,7 @@ int main(
         const std::filesystem::path optixir_path =
             argc >= 3
                 ? std::filesystem::absolute(std::filesystem::path{argv[2]})
-                : modules_directory / "raindrop_trace.optixir";
+                : modules_directory / "optix_smoke.optixir";
 
         // 所有者は一つだけ作り，M1 と M2 の両方より長く生存させる．
         // ordinal 0 は CUDA から見える最初の device を指定する．

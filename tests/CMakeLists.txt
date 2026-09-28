@@ -69,3 +69,5 @@ foreach(test_suite IN ITEMS field phase)
     set_tests_properties(rainbow_${test_suite}_cpu PROPERTIES LABELS "cpu;numerics")
     set_tests_properties(rainbow_${test_suite}_cuda PROPERTIES LABELS "gpu;cuda;numerics")
 endforeach()
+
+include("${CMAKE_CURRENT_LIST_DIR}/raindrop_trace_tests.cmake")
