@@ -1,4 +1,4 @@
-#include "field_test_cases.hpp"
+#include "phase_test_cases.hpp"
 #include "cuda_array_test.hpp"
 
 #include <cstdlib>
@@ -15,20 +15,20 @@ int main(const int argc, char* argv[])
 {
     if(argc != 2)
     {
-        std::cerr << "Usage: rainbow_field_cuda_tests <field_test.fatbin>\n";
+        std::cerr << "Usage: rainbow_phase_cuda_tests <phase_test.fatbin>\n";
         return EXIT_FAILURE;
     }
     try
     {
         rainbow::CudaContext cuda_context{0};
         rainbow::tests::CudaArrayTest<
-            rainbow::tests::FieldTestInput,
-            rainbow::tests::FieldTestResult> test(
-                cuda_context, rainbow::tests::make_field_test_inputs());
-        test.run(std::filesystem::path{argv[1]}, "evaluate_field_arithmetic");
+            rainbow::tests::PhaseTestInput,
+            rainbow::tests::PhaseTestResult> test(
+                cuda_context, rainbow::tests::make_phase_test_inputs());
+        test.run(std::filesystem::path{argv[1]}, "evaluate_phase_arithmetic");
 
         // 入力生成と数値検証はテスト固有．GPU 資源管理は field / phase で共有する．
-        rainbow::tests::FieldTestVerifier verifier;
+        rainbow::tests::PhaseTestVerifier verifier;
         verifier.verify(test.inputs(), test.outputs());
         verifier.print_summary("CUDA", test.inputs().size());
         return EXIT_SUCCESS;

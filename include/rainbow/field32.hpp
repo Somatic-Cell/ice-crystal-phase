@@ -25,14 +25,14 @@ struct Field32
         return {x - rhs.x, y - rhs.y};
     }
 
-    HOST_DEVICE constexpr Field32 operator+=(const Field32 rhs) noexcept
+    HOST_DEVICE constexpr Field32& operator+=(const Field32 rhs) noexcept
     {
         x += rhs.x;
         y += rhs.y;
         return *this;
     }
     
-    HOST_DEVICE constexpr Field32 operator-=(const Field32 rhs) noexcept
+    HOST_DEVICE constexpr Field32& operator-=(const Field32 rhs) noexcept
     {
         x -= rhs.x;
         y -= rhs.y;

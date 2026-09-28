@@ -5,6 +5,17 @@
 #include <iostream>
 #include <span>
 #include <vector>
+#include <type_traits>
+#include <utility>
+
+// 通常の複合代入と同様に，左辺自身への参照を返す契約を検査する．
+// 値を返すと，(a += b) += c の二回目は a ではなく一時値を更新してしまう．
+static_assert(std::is_same_v<
+    decltype(std::declval<rainbow::Field32&>() += std::declval<rainbow::Field32>()),
+    rainbow::Field32&>);
+static_assert(std::is_same_v<
+    decltype(std::declval<rainbow::Field32&>() -= std::declval<rainbow::Field32>()),
+    rainbow::Field32&>);
 
 int main()
 {
