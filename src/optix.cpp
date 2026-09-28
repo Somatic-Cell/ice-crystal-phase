@@ -14,6 +14,7 @@
 #include <rainbow/cuda_error.hpp>
 #include <rainbow/optix_error.hpp>
 #include <rainbow/read_binary_file.hpp>
+#include <rainbow/device_buffer.hpp>
 
 #include <cuda.h>
 #include <optix.h>
@@ -31,6 +32,7 @@
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <span>
 #include <stdexcept>
 #include <type_traits>
 #include <vector>
@@ -122,7 +124,11 @@ class OptixSmokeTest final
 {
 public:
     explicit OptixSmokeTest(const rainbow::CudaContext& cuda_context) noexcept
-        : cuda_context_(cuda_context)
+        : cuda_context_(cuda_context),
+        device_output_(cuda_context),
+        device_params_(cuda_context),
+        device_raygen_record_(cuda_context),
+        device_miss_record_(cuda_context)
     {
     }
 
@@ -152,10 +158,11 @@ private:
     OptixProgramGroup miss_program_group_ = nullptr;
     OptixPipeline pipeline_ = nullptr;
 
-    CUdeviceptr device_output_ = 0;
-    CUdeviceptr device_params_ = 0;
-    CUdeviceptr device_raygen_record_ = 0;
-    CUdeviceptr device_miss_record_ = 0;
+    rainbow::DeviceBuffer<std::uint32_t> device_output_;
+    rainbow::DeviceBuffer<rainbow::TraceLaunchParams> device_params_;
+    rainbow::DeviceBuffer<RaygenRecord> device_raygen_record_;
+    rainbow::DeviceBuffer<MissRecord> device_miss_record_;
+
 
     // Async 転送元をローカルな一時変数にせず，所有者のメンバとして保持する．
     // 例外が起きても destructor 本体の同期が終わるまで，転送元は生存している．
@@ -222,8 +229,6 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
 
     OptixProgramGroupDesc miss_description = {};
     miss_description.kind = OPTIX_PROGRAM_GROUP_KIND_MISS;
-
-    // M2 では実行する miss shader を指定しない．
     miss_description.miss.module = nullptr;
     miss_description.miss.entryFunctionName = nullptr;
 
@@ -293,29 +298,19 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     // ----- GPU buffer と raygen SBT record -----
     constexpr std::uint32_t element_count = 1024;
     constexpr std::uint32_t expected_mask = 0xa5a5a5a5u;
-    const std::size_t output_byte_size =
-        static_cast<std::size_t>(element_count) * sizeof(std::uint32_t);
+    device_output_.allocate(element_count);
+    device_params_.allocate(1);
+    device_raygen_record_.allocate(1);
+    device_miss_record_.allocate(1);
 
-    RAINBOW_CUDA_CHECK(cuMemAlloc(&device_output_, output_byte_size));
-    RAINBOW_CUDA_CHECK(cuMemAlloc(&device_params_, sizeof(host_params_)));
-    RAINBOW_CUDA_CHECK(cuMemAlloc(
-        &device_raygen_record_, sizeof(host_raygen_record_)));
-
-    RAINBOW_CUDA_CHECK(
-    cuMemAlloc(
-        &device_miss_record_,
-        sizeof(host_miss_record_)));
-
-    host_params_.output = reinterpret_cast<std::uint32_t*>(device_output_);
+    host_params_.output = device_output_.data();
     host_params_.count = element_count;
     host_params_.reserved = 0;
     RAINBOW_OPTIX_CHECK(optixSbtRecordPackHeader(
         raygen_program_group_, &host_raygen_record_));
 
-    RAINBOW_OPTIX_CHECK(
-    optixSbtRecordPackHeader(
-        miss_program_group_,
-        &host_miss_record_));
+    RAINBOW_OPTIX_CHECK(optixSbtRecordPackHeader(
+        miss_program_group_, &host_miss_record_));
 
     // ----- 同じ stream に初期化・転送・launch を順に投入する． -----
     // CUDA 13.x では pageable host memory を使う Async 転送も扱えるが，
@@ -323,31 +318,29 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
     // 必要になれば pinned staging buffer へ変更する．現在も転送元の寿命は保持する．
     const CUstream stream = cuda_context_.stream();
     has_pending_work_ = true;
-    RAINBOW_CUDA_CHECK(cuMemsetD32Async(
-        device_output_, 0, element_count, stream));
-    RAINBOW_CUDA_CHECK(cuMemcpyHtoDAsync(
-        device_params_, &host_params_, sizeof(host_params_), stream));
-    RAINBOW_CUDA_CHECK(cuMemcpyHtoDAsync(
-        device_raygen_record_, &host_raygen_record_, sizeof(host_raygen_record_), stream));
-
-    RAINBOW_CUDA_CHECK(
-    cuMemcpyHtoDAsync(
-        device_miss_record_,
-        &host_miss_record_,
-        sizeof(host_miss_record_),
-        stream));
+    device_output_.zero_byte_async(
+        stream
+    );
+    device_params_.upload_async(
+        std::span<const rainbow::TraceLaunchParams>{&host_params_, 1}, stream
+    );
+    device_raygen_record_.upload_async(
+        std::span<const RaygenRecord>{&host_raygen_record_, 1}, stream
+    );
+    device_miss_record_.upload_async(
+        std::span<const MissRecord>{&host_miss_record_, 1}, stream
+    );
 
     OptixShaderBindingTable sbt = {};
 
-    sbt.raygenRecord = device_raygen_record_;
-
-    sbt.missRecordBase = device_miss_record_;
+    sbt.raygenRecord = device_raygen_record_.address();
+    sbt.missRecordBase = device_miss_record_.address();
     sbt.missRecordStrideInBytes =
         static_cast<unsigned int>(sizeof(MissRecord));
     sbt.missRecordCount = 1;
     
     RAINBOW_OPTIX_CHECK(optixLaunch(
-        pipeline_, stream, device_params_, sizeof(host_params_), &sbt,
+        pipeline_, stream, device_params_.address(), device_params_.byte_size(), &sbt,
         element_count, 1, 1));
 
     // launch 自体の成功と，GPU 上での実行完了は別なので，ここでも戻り値を検査する．
@@ -356,8 +349,7 @@ void OptixSmokeTest::run(const std::filesystem::path& optixir_path)
 
     // GPU 書き込み完了後に，同期コピーで通常のホストメモリへ読み戻す．
     std::vector<std::uint32_t> host_output(element_count);
-    RAINBOW_CUDA_CHECK(cuMemcpyDtoH(
-        host_output.data(), device_output_, output_byte_size));
+    device_output_.download(std::span<std::uint32_t>{host_output});
 
     for(std::uint32_t element_index = 0; element_index < element_count; ++element_index)
     {
@@ -390,10 +382,10 @@ bool OptixSmokeTest::release_resources() noexcept
         && raygen_program_group_ == nullptr 
         && miss_program_group_ == nullptr 
         && pipeline_ == nullptr
-        && device_output_ == 0 
-        && device_params_ == 0 
-        && device_raygen_record_ == 0
-        && device_miss_record_ == 0)
+        && device_output_.is_empty() 
+        && device_params_.is_empty() 
+        && device_raygen_record_.is_empty()
+        && device_miss_record_.is_empty())
     {
         return true;
     }
@@ -415,33 +407,15 @@ bool OptixSmokeTest::release_resources() noexcept
         has_pending_work_ = false;
     }
 
-    // 短絡評価で後続 cleanup を飛ばさないよう，API 呼び出しを && の左側に置く．
-    if(device_raygen_record_ != 0)
-    {
-        succeeded = rainbow::detail::report_cuda_cleanup_result(
-            cuMemFree(device_raygen_record_), "cuMemFree(raygen record)") && succeeded;
-        device_raygen_record_ = 0;
-    }
-    if(device_miss_record_ != 0)
-    {
-        succeeded = rainbow::detail::report_cuda_cleanup_result(
-            cuMemFree(device_miss_record_),
-            "cuMemFree(miss record)") && succeeded;
 
-        device_miss_record_ = 0;
-    }
-    if(device_params_ != 0)
-    {
-        succeeded = rainbow::detail::report_cuda_cleanup_result(
-            cuMemFree(device_params_), "cuMemFree(launch params)") && succeeded;
-        device_params_ = 0;
-    }
-    if(device_output_ != 0)
-    {
-        succeeded = rainbow::detail::report_cuda_cleanup_result(
-            cuMemFree(device_output_), "cuMemFree(output)") && succeeded;
-        device_output_ = 0;
-    }
+    // ここまでの同期が，バッファのデストラクタよりも先に必要
+    // 各バッファは同期せず，自分の領域だけを開放する
+    // 左辺を必ず評価して，一つの失敗で後続の clean up を飛ばさない
+    succeeded = device_raygen_record_.close_noexcept() && succeeded;
+    succeeded = device_miss_record_.close_noexcept() && succeeded;
+    succeeded = device_params_.close_noexcept() && succeeded;
+    succeeded = device_output_.close_noexcept() && succeeded;
+
     if(pipeline_ != nullptr)
     {
         succeeded = rainbow::detail::report_optix_cleanup_result(

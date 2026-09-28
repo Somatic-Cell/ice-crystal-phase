@@ -62,6 +62,7 @@ add_executable(
     ${PROJECT_NAME}
     apps/main.cpp 
     src/cuda_driver.cpp 
+    src/cuda_module.cpp 
     src/optix.cpp 
     src/patch_accel.cpp 
 )

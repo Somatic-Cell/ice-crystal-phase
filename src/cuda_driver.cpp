@@ -1,12 +1,14 @@
 #include <rainbow/cuda_driver.hpp>
 #include <rainbow/cuda_error.hpp>
-#include <rainbow/read_binary_file.hpp>
+#include <rainbow/cuda_module.hpp>
+#include <rainbow/device_buffer.hpp>
 
 #include <cuda.h>
 
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -19,7 +21,9 @@ class CudaDriverSmokeTest final
 {
 public:
     explicit CudaDriverSmokeTest(const rainbow::CudaContext& cuda_context) noexcept
-        : cuda_context_(cuda_context)
+        : cuda_context_(cuda_context),
+        module_(cuda_context),
+        device_output_(cuda_context)
     {
     }
 
@@ -41,72 +45,46 @@ private:
     bool release_resources() noexcept;
 
     const rainbow::CudaContext& cuda_context_;
-    CUmodule module_ = nullptr;
-    CUdeviceptr device_output_ = 0;
+    rainbow::CudaModule module_;
+    rainbow::DeviceBuffer<std::uint32_t> device_output_;
     bool has_pending_work_ = false;
 };
 
 void CudaDriverSmokeTest::run(const std::filesystem::path& fatbin_path)
 {
     cuda_context_.make_current();
+    module_.load_fatbin(fatbin_path);
+    const CUfunction function = module_.find_function("write_test_pattern");
 
-    const std::vector<char> fatbin = rainbow::read_binary_file(fatbin_path);
-    RAINBOW_CUDA_CHECK(cuModuleLoadData(&module_, fatbin.data()));
-
-    // extern "C" とこの名前が一致する必要がある．関数ハンドルは module から借用する．
-    CUfunction function = nullptr;
-    const CUresult lookup_result =
-        cuModuleGetFunction(&function, module_, "write_test_pattern");
-    if(lookup_result == CUDA_ERROR_NOT_FOUND)
-    {
-        std::cerr << "CUDA module: " << fatbin_path
-                  << "\nExpected kernel: write_test_pattern"
-                  << "\nCheck extern \"C\" and rebuild / update the staged .fatbin file.\n";
-    }
-    rainbow::detail::check_cuda(
-        lookup_result, "cuModuleGetFunction(write_test_pattern)", __FILE__, __LINE__);
-
-    // 既存 M1 と同じ要素数・パターンを維持する．性能を測る benchmark ではない．
     std::uint32_t element_count = 1024;
     constexpr std::uint32_t expected_mask = 0x5a5a5a5au;
     constexpr unsigned int threads_per_block = 256;
     const unsigned int block_count =
         element_count / threads_per_block
         + (element_count % threads_per_block != 0 ? 1u : 0u);
-    const std::size_t output_byte_size =
-        static_cast<std::size_t>(element_count) * sizeof(std::uint32_t);
 
     static_assert(sizeof(void*) == 8, "This project requires a 64-bit build.");
     static_assert(sizeof(CUdeviceptr) == sizeof(void*));
     static_assert(sizeof(unsigned int) == sizeof(std::uint32_t));
 
-    RAINBOW_CUDA_CHECK(cuMemAlloc(&device_output_, output_byte_size));
+    device_output_.allocate(element_count);
     const CUstream stream = cuda_context_.stream();
-
-    // 未書き込みを検出するため，期待値とは異なる 0 で初期化する．
-    // 非同期 API の途中で失敗しても destructor が同期を試みるよう，先にフラグを立てる．
     has_pending_work_ = true;
-    RAINBOW_CUDA_CHECK(cuMemsetD32Async(device_output_, 0, element_count, stream));
+    device_output_.zero_byte_async(stream);
 
-    // Driver API には「引数値を格納したホスト変数のアドレス」を渡す．
-    // device_output_ 自体は GPU アドレス値で，&device_output_ はホスト側の格納場所．
-    // 配列の順序と各引数の型は，write_test_pattern の宣言に一致させる．
-    void* kernel_parameters[] = {&device_output_, &element_count};
+    CUdeviceptr output_address = device_output_.address();
+    void* kernel_parameters[] = {&output_address, &element_count};
     RAINBOW_CUDA_CHECK(cuLaunchKernel(
         function,
         block_count, 1, 1,
         threads_per_block, 1, 1,
         0, stream, kernel_parameters, nullptr));
-
-    // launch の受付成功と GPU 実行完了は別．非同期実行のエラーもここで検査する．
+    
     RAINBOW_CUDA_CHECK(cuStreamSynchronize(stream));
     has_pending_work_ = false;
 
-    // 明示 stream の完了を待ってから同期コピーする．pinned memory は M1/M2 では不要．
     std::vector<std::uint32_t> host_output(element_count);
-    RAINBOW_CUDA_CHECK(cuMemcpyDtoH(
-        host_output.data(), device_output_, output_byte_size));
-
+    device_output_.download(std::span<std::uint32_t>{host_output});
     for(std::uint32_t element_index = 0; element_index < element_count; ++element_index)
     {
         const std::uint32_t expected = element_index ^ expected_mask;
@@ -125,20 +103,19 @@ void CudaDriverSmokeTest::run(const std::filesystem::path& fatbin_path)
     RAINBOW_CUDA_CHECK(cuDeviceGetName(
         device_name, static_cast<int>(sizeof(device_name)), cuda_context_.device()));
 
-    // 借りた context / stream は解放しない．正常経路の cleanup 失敗も隠さない．
     if(!release_resources())
     {
         throw std::runtime_error(
             "CUDA output passed verification, but resource cleanup failed. See stderr.");
     }
-
     std::cout << "CUDA device: " << device_name << '\n'
               << "CUDA Driver API smoke test: passed\n";
+
 }
 
 bool CudaDriverSmokeTest::release_resources() noexcept
 {
-    if(module_ == nullptr && device_output_ == 0)
+    if(!module_.is_loaded() && device_output_.is_empty())
     {
         return true;
     }
@@ -159,19 +136,8 @@ bool CudaDriverSmokeTest::release_resources() noexcept
         has_pending_work_ = false;
     }
 
-    // API を && の左に置き，先の失敗で後続 cleanup が短絡評価されないようにする．
-    if(device_output_ != 0)
-    {
-        succeeded = rainbow::detail::report_cuda_cleanup_result(
-            cuMemFree(device_output_), "cuMemFree(smoke output)") && succeeded;
-        device_output_ = 0;
-    }
-    if(module_ != nullptr)
-    {
-        succeeded = rainbow::detail::report_cuda_cleanup_result(
-            cuModuleUnload(module_), "cuModuleUnload(smoke module)") && succeeded;
-        module_ = nullptr;
-    }
+    succeeded = device_output_.close_noexcept() && succeeded;
+    succeeded = module_.close_noexcept() && succeeded;
     return succeeded;
 }
 }
@@ -221,7 +187,6 @@ CudaContext::CudaContext(
     // リソースを順番に確保する．失敗したら開放し，各メンバ変数を再初期化する．
     try{
         RAINBOW_CUDA_CHECK(cuCtxSetCurrent(context_));
-
         RAINBOW_CUDA_CHECK(cuStreamCreate(&stream_, CU_STREAM_NON_BLOCKING));
     }
     catch(...)
