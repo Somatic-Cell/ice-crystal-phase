@@ -197,6 +197,7 @@ target_include_directories(
 
 include("${PROJECT_SOURCE_DIR}/cmake/raindrop_trace.cmake")
 include("${PROJECT_SOURCE_DIR}/cmake/patch_build.cmake")
+include("${PROJECT_SOURCE_DIR}/cmake/patch_query.cmake")
 # -----------------------------------------------------------------------------
 # Build ordering
 # -----------------------------------------------------------------------------
@@ -242,10 +243,16 @@ add_custom_target(
         "${CMAKE_COMMAND}" -E copy_if_different
         "$<TARGET_OBJECTS:rainbow_raindrop_trace_module>"
         "$<TARGET_FILE_DIR:${PROJECT_NAME}>/modules/raindrop_trace.optixir"
+
     COMMAND
         "${CMAKE_COMMAND}" -E copy_if_different
         "$<TARGET_OBJECTS:rainbow_optix_smoke_module>"
         "$<TARGET_FILE_DIR:Rainbow>/modules/optix_smoke.optixir"
+
+     COMMAND
+        "${CMAKE_COMMAND}" -E copy_if_different
+        "$<TARGET_OBJECTS:rainbow_patch_query_module>"
+        "$<TARGET_FILE_DIR:Rainbow>/modules/patch_query.optixir"
 
     COMMAND_EXPAND_LISTS
     VERBATIM
@@ -272,6 +279,11 @@ add_dependencies(
 add_dependencies(
     rainbow_trace
     rainbow_stage_modules
+)
+
+add_dependencies(
+    rainbow_stage_modules
+    rainbow_patch_query_module
 )
 
 

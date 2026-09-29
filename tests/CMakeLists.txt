@@ -72,3 +72,4 @@ endforeach()
 
 include("${CMAKE_CURRENT_LIST_DIR}/raindrop_trace_tests.cmake")
 include("${CMAKE_CURRENT_LIST_DIR}/patch_build_tests.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/patch_query_tests.cmake")

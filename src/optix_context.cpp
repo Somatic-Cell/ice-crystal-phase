@@ -25,7 +25,7 @@ OptixContext::OptixContext(const CudaContext& cuda_context):cuda_context_(cuda_c
     initialize_runtime();
     OptixDeviceContextOptions options{};
     options.logCallbackFunction=&log_callback;
-    options.logCallbackLevel=3;
+    options.logCallbackLevel=4;
 #ifndef NDEBUG
     options.validationMode=OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
 #endif

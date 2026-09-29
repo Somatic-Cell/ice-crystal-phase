@@ -1,5 +1,6 @@
 #include <rainbow/raindrop_tracer.hpp>
 #include <rainbow/patch_accel.hpp>
+#include <rainbow/patch_query.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +20,8 @@ struct TraceCommandLine
 {
     std::filesystem::path module_path,output_path;
     std::filesystem::path patch_module_path,patch_csv_path;
+    std::filesystem::path query_module_path,query_csv_path,query_hits_csv_path;
+    std::uint32_t query_theta=90,query_phi=180;
     rainbow::RaindropSettings settings;
 
     template<class Char> static TraceCommandLine parse(const int argc,Char* argv[])
@@ -27,7 +30,9 @@ struct TraceCommandLine
             "Usage: rainbow_trace <raindrop_trace.optixir> <vertices.csv> [--radius-mm value] "
             "[--grid count] [--inclination-deg value] [--azimuth-deg value] "
             "[--wavelength-nm value --ior value] [--polarization x|y] [--sphere] "
-            "[--patch-module patch_build.fatbin] [--patch-csv patches.csv]");
+            "[--patch-module patch_build.fatbin] [--patch-csv patches.csv] "
+            "[--query-module patch_query.optixir --query-csv queries.csv] "
+            "[--query-hits-csv hits.csv] [--query-theta N --query-phi N]");
         TraceCommandLine command;
         command.module_path=std::filesystem::path(argv[1]);
         command.output_path=std::filesystem::path(argv[2]);
@@ -54,6 +59,12 @@ struct TraceCommandLine
             {command.patch_module_path=std::filesystem::path(argv[i]);continue;}
             if(option=="--patch-csv")
             {command.patch_csv_path=std::filesystem::path(argv[i]);continue;}
+            if(option=="--query-module")
+            {command.query_module_path=std::filesystem::path(argv[i]);continue;}
+            if(option=="--query-csv")
+            {command.query_csv_path=std::filesystem::path(argv[i]);continue;}
+            if(option=="--query-hits-csv")
+            {command.query_hits_csv_path=std::filesystem::path(argv[i]);continue;}
             const std::string value=ascii(argv[i]);
             if(option=="--polarization")
             {
@@ -62,13 +73,16 @@ struct TraceCommandLine
                 else throw std::invalid_argument("polarization must be x or y (separate coherent input states).");
                 continue;
             }
-            if(option=="--grid")
+            if(option=="--grid" || option=="--query-theta" || option=="--query-phi")
             {
                 if(value.empty()||value.find_first_not_of("0123456789")!=std::string::npos)
                     throw std::invalid_argument("grid must be an unsigned integer.");
                 std::size_t used=0;const unsigned long count=std::stoul(value,&used);
                 if(used!=value.size()||count>32767)throw std::invalid_argument("grid is out of range.");
-                command.settings.grid_width=command.settings.grid_height=static_cast<std::uint32_t>(count);
+                if(count==0)throw std::invalid_argument("Grid count must be positive.");
+                if(option=="--query-theta")command.query_theta=static_cast<std::uint32_t>(count);
+                else if(option=="--query-phi")command.query_phi=static_cast<std::uint32_t>(count);
+                else command.settings.grid_width=command.settings.grid_height=static_cast<std::uint32_t>(count);
                 continue;
             }
             std::size_t used=0;const float number=std::stof(value,&used);
@@ -86,6 +100,22 @@ struct TraceCommandLine
            && std::filesystem::absolute(command.patch_csv_path).lexically_normal()
               ==std::filesystem::absolute(command.output_path).lexically_normal())
             throw std::invalid_argument("Vertex CSV and patch CSV must have different paths.");
+        const bool wants_query=!command.query_module_path.empty();
+        if(wants_query && (command.patch_module_path.empty() || command.query_csv_path.empty()))
+            throw std::invalid_argument("--query-module requires --patch-module and --query-csv.");
+        if(!wants_query && (!command.query_csv_path.empty() || !command.query_hits_csv_path.empty()))
+            throw std::invalid_argument("Query output requires --query-module.");
+        const std::array<std::filesystem::path,4> outputs={command.output_path,command.patch_csv_path,
+            command.query_csv_path,command.query_hits_csv_path};
+        for(std::size_t a=0;a<outputs.size();++a)for(std::size_t b=a+1;b<outputs.size();++b)
+        {
+            if(outputs[a].empty() || outputs[b].empty())continue;
+            const auto pa=std::filesystem::absolute(outputs[a]).lexically_normal();
+            const auto pb=std::filesystem::absolute(outputs[b]).lexically_normal();
+            if(pa==pb || (std::filesystem::exists(pa) && std::filesystem::exists(pb)
+                         && std::filesystem::equivalent(pa,pb)))
+                throw std::invalid_argument("Output paths must be distinct.");
+        }
         if(wavelength_given&&!index_given)
             throw std::invalid_argument("Specify --ior together with --wavelength-nm; no water dispersion fit is silently assumed.");
         if(std::abs(inclination)>90||std::abs(azimuth)>360)
@@ -158,6 +188,27 @@ template<class Char> int run(const int argc,Char* argv[])
             {
                 patches.write_csv(command.patch_csv_path);
                 std::cout<<"Saved "<<command.patch_csv_path<<" (all logical cell statuses).\n";
+            }
+            if(!command.query_module_path.empty())
+            {
+                // patches と tracer は query より長く生存する．GAS は再構築しない．
+                rainbow::PatchQuery query(cuda_context,tracer.optix_context());
+                query.create_pipeline(command.query_module_path);
+                query.query_grid(patches,tracer.config(),command.query_theta,command.query_phi);
+                query.write_csv(command.query_csv_path);
+                if(!command.query_hits_csv_path.empty())query.write_hits_csv(command.query_hits_csv_path);
+                const auto& q=query.statistics();
+                std::cout<<"Patch query: directions="<<q.directions<<", nonempty="<<q.nonempty_directions
+                    <<", intersections="<<q.hits<<", max_hits="<<q.max_hits
+                    <<", unresolved_or_error_directions="<<q.error_directions
+                    <<", refinement_directions="<<q.refinement_directions
+                    <<", boundary_directions="<<q.boundary_directions
+                    <<", fp64_directions="<<q.fp64_directions<<'\n';
+                std::cout<<"Saved "<<command.query_csv_path<<" (geometric hit counts, NOT a phase function).\n";
+                std::cout<<"Missing source cells / boundary ownership / nonregular optical evaluation remain pending.\n";
+                const bool failed=q.error_directions!=0;
+                query.close();
+                if(failed)throw std::runtime_error("Unresolved patch query directions remain; see CSV flags.");
             }
             patches.close();
         }
