@@ -2,6 +2,8 @@
 
 #include <rainbow/raindrop_trace_data.hpp>
 #include <cstdint>
+#include <cmath>
+#include <limits>
 #include <type_traits>
 
 namespace rainbow
@@ -27,15 +29,42 @@ struct BoundaryHit
 
 namespace detail
 {
-template<class T> HOST_DEVICE T next_down(const T x) noexcept
+// 型ごとの正の無限大．namespace scope の constexpr 値として用意する．
+// GPU 側ではこの値を使用し，std::numeric_limits の関数を直接呼ばない．
+template<class T>
+inline constexpr T positive_infinity_v =
+    std::numeric_limits<T>::infinity();
+
+template<class T>
+HOST_DEVICE T next_down(const T x) noexcept
 {
-    if constexpr(std::is_same_v<T,float>) return ::nextafterf(x,-INFINITY);
-    else return ::nextafter(x,-INFINITY);
+    static_assert(
+        std::is_same_v<T, float> || std::is_same_v<T, double>);
+
+    if constexpr(std::is_same_v<T, float>)
+    {
+        return ::nextafterf(x, -positive_infinity_v<float>);
+    }
+    else
+    {
+        return ::nextafter(x, -positive_infinity_v<double>);
+    }
 }
-template<class T> HOST_DEVICE T next_up(const T x) noexcept
+
+template<class T>
+HOST_DEVICE T next_up(const T x) noexcept
 {
-    if constexpr(std::is_same_v<T,float>) return ::nextafterf(x,INFINITY);
-    else return ::nextafter(x,INFINITY);
+    static_assert(
+        std::is_same_v<T, float> || std::is_same_v<T, double>);
+
+    if constexpr(std::is_same_v<T, float>)
+    {
+        return ::nextafterf(x, positive_infinity_v<float>);
+    }
+    else
+    {
+        return ::nextafter(x, positive_infinity_v<double>);
+    }
 }
 template<class T> HOST_DEVICE T root_sqrt(const T x) noexcept
 {
@@ -64,7 +93,7 @@ template<class T> struct RootInterval
     }
     HOST_DEVICE RootInterval operator/(const RootInterval b) const noexcept
     {
-        if(b.lo<=T(0) && b.hi>=T(0)) return {-T(INFINITY),T(INFINITY)};
+        if(b.lo<=T(0) && b.hi>=T(0)) return {-positive_infinity_v<T>,positive_infinity_v<T>};
         return *this * RootInterval{next_down(T(1)/b.hi),next_up(T(1)/b.lo)};
     }
     HOST_DEVICE RootInterval squared() const noexcept
@@ -94,9 +123,9 @@ template<class T> HOST_DEVICE RootBounds<T> bound_surface(
     const I py=I::point(origin.y)+t*I::point(direction.y);
     const I pz=I::point(origin.z)+t*I::point(direction.z);
     const I r=(px.squared()+py.squared()+pz.squared()).square_root();
-    if(r.hi<T(shape.inner_radius)) return {{-T(1),-T(1)},{-T(INFINITY),T(INFINITY)}};
-    if(r.lo>T(shape.outer_radius)) return {{T(1),T(1)},{-T(INFINITY),T(INFINITY)}};
-    if(r.lo<=T(0)) return {{-T(INFINITY),T(INFINITY)},{-T(INFINITY),T(INFINITY)}};
+    if(r.hi<T(shape.inner_radius)) return {{-T(1),-T(1)},{-positive_infinity_v<T>,positive_infinity_v<T>}};
+    if(r.lo>T(shape.outer_radius)) return {{T(1),T(1)},{-positive_infinity_v<T>,positive_infinity_v<T>}};
+    if(r.lo<=T(0)) return {{-positive_infinity_v<T>,positive_infinity_v<T>},{-positive_infinity_v<T>,positive_infinity_v<T>}};
     I mu=(-py)/r;
     mu.lo=max_value(mu.lo,-T(1)); mu.hi=min_value(mu.hi,T(1));
     I previous=I::point(T(1)),current=mu,dp=I::point(T(0)),dc=I::point(T(1));
@@ -118,14 +147,64 @@ template<class T> HOST_DEVICE RootBounds<T> bound_surface(
     return {r-radius,dr-slope*dm};
 }
 
+// 終了理由を数値計算の結果と分離する．診断は判定・許容誤差を変更しない．
+enum class RootStopReason : std::uint32_t
+{
+    None = 0,
+    InsideStartNotInside = 1,
+    VisitLimit = 2,
+    BracketIterationLimit = 3,
+    WidthLimit = 4,
+    MidpointStagnation = 5,
+    StackLimit = 6
+};
+
+template<class T> struct RootSolverDiagnostics
+{
+    BoundaryCode result = BoundaryCode::Miss;
+    RootStopReason reason = RootStopReason::None;
+    std::uint32_t visits = 0;
+    std::uint32_t iterations = 0;
+    std::uint32_t pending_segments = 0;
+    T lower = T(0), upper = T(0), tolerance = T(0);
+    T f_lower = T(0), f_upper = T(0);
+    RootBounds<T> bounds{};
+    bool has_bounds = false;
+    bool has_endpoint_values = false;
+
+    HOST_DEVICE void stop(
+        const RootStopReason why, const unsigned visit_count,
+        const unsigned iteration_count, const unsigned pending_count,
+        const T lo, const T hi, const T tol) noexcept
+    {
+        reason = why;
+        visits = visit_count;
+        iterations = iteration_count;
+        pending_segments = pending_count;
+        lower = lo;
+        upper = hi;
+        tolerance = tol;
+    }
+};
+
+// 任意の診断出力．GPU 出力 ABI (OutgoingVertex) には含めない．
+struct BoundarySolveDiagnostics
+{
+    RootSolverDiagnostics<float> fp32{};
+    RootSolverDiagnostics<double> fp64{};
+    bool used_fp64 = false;
+};
+
 template<class T> struct SurfaceRoot { BoundaryCode code; T distance; };
 
 // 陰関数そのものへの bracket + safeguarded Newton．三角形化・楕円体近似はしない．
 // 左区間を先に処理し，単調性を interval derivative で確認した bracket だけを解く．
 // root を除外できないまま解像度/計算上限に達したら Unresolved を返す（miss へ変換しない）．
 template<class T> HOST_DEVICE SurfaceRoot<T> solve_surface(
-    const RaindropShape& shape,const BoundaryRay& ray) noexcept
+    const RaindropShape& shape,const BoundaryRay& ray,
+    RootSolverDiagnostics<T>* diagnostic = nullptr) noexcept
 {
+    if(diagnostic != nullptr) *diagnostic = {};
     const Vec3T<T> o=ray.physical_origin.template cast<T>();
     const Vec3T<T> w=ray.direction.template cast<T>();
     const T start=T(ray.start_distance);
@@ -136,7 +215,16 @@ template<class T> HOST_DEVICE SurfaceRoot<T> solve_surface(
     {
         const T f=shape.implicit_value(o.at(w,start));
         // ごく浅い grazing chord を self-hit epsilon で黙って飛ばさない．
-        if(!(f<T(0))) return {BoundaryCode::Unresolved,T(0)};
+        if(!(f<T(0)))
+        {
+            if(diagnostic != nullptr)
+            {
+                diagnostic->stop(RootStopReason::InsideStartNotInside,0,0,0,start,start,tolerance);
+                diagnostic->f_lower = diagnostic->f_upper = f;
+                diagnostic->has_endpoint_values = true;
+            }
+            return {BoundaryCode::Unresolved,T(0)};
+        }
     }
 
     struct Segment { T lo,hi; };
@@ -146,7 +234,23 @@ template<class T> HOST_DEVICE SurfaceRoot<T> solve_surface(
     constexpr unsigned visit_limit=16384;
     while(size!=0)
     {
-        if(++visits>visit_limit) return {BoundaryCode::Unresolved,T(0)};
+        if(++visits>visit_limit)
+        {
+            if(diagnostic != nullptr)
+            {
+                const Segment pending = stack[size-1];
+                const T middle = pending.lo+(pending.hi-pending.lo)*T(0.5);
+                diagnostic->stop(RootStopReason::VisitLimit,visits,0,size,
+                    pending.lo,pending.hi,tolerance*max_value(T(1),abs_value(middle)));
+                // 以下は停止が決定した後の診断専用評価．
+                diagnostic->bounds = bound_surface(shape,o,w,pending.lo,pending.hi);
+                diagnostic->has_bounds = true;
+                diagnostic->f_lower = shape.implicit_value(o.at(w,pending.lo));
+                diagnostic->f_upper = shape.implicit_value(o.at(w,pending.hi));
+                diagnostic->has_endpoint_values = true;
+            }
+            return {BoundaryCode::Unresolved,T(0)};
+        }
         const Segment s=stack[--size];
         const auto bounds=bound_surface(shape,o,w,s.lo,s.hi);
         if(bounds.value.excludes_zero()) continue;
@@ -173,11 +277,38 @@ template<class T> HOST_DEVICE SurfaceRoot<T> solve_surface(
                     const T guard=(hi-lo)*T(0.1);
                     x=candidate>lo+guard && candidate<hi-guard?candidate:lo+(hi-lo)*T(0.5);
                 }
+                if(diagnostic != nullptr)
+                {
+                    diagnostic->stop(RootStopReason::BracketIterationLimit,visits,96,size,
+                        lo,hi,width_tolerance);
+                    // 最後の bracket 自体の区間値を記録する．再評価は探索に使わない．
+                    diagnostic->bounds = bound_surface(shape,o,w,lo,hi);
+                    diagnostic->has_bounds = true;
+                    diagnostic->f_lower = f_lo;
+                    diagnostic->f_upper = f_hi;
+                    diagnostic->has_endpoint_values = true;
+                }
                 return {BoundaryCode::Unresolved,T(0)};
             }
         }
         if(s.hi-s.lo<=width_tolerance || mid==s.lo || mid==s.hi || size+2>64)
+        {
+            if(diagnostic != nullptr)
+            {
+                const RootStopReason reason = s.hi-s.lo<=width_tolerance
+                    ? RootStopReason::WidthLimit
+                    : (mid==s.lo || mid==s.hi)
+                        ? RootStopReason::MidpointStagnation : RootStopReason::StackLimit;
+                diagnostic->stop(reason,visits,0,size,s.lo,s.hi,width_tolerance);
+                diagnostic->bounds = bounds;
+                diagnostic->has_bounds = true;
+                // 追加の評価は終了が決定した後だけ．探索の分岐には利用しない．
+                diagnostic->f_lower = shape.implicit_value(o.at(w,s.lo));
+                diagnostic->f_upper = shape.implicit_value(o.at(w,s.hi));
+                diagnostic->has_endpoint_values = true;
+            }
             return {BoundaryCode::Unresolved,T(0)};
+        }
         stack[size++]={mid,s.hi};
         stack[size++]={s.lo,mid};
     }
@@ -188,10 +319,15 @@ template<class T> HOST_DEVICE SurfaceRoot<T> solve_surface(
 struct RaindropIntersector
 {
     const RaindropShape& shape;
-    HOST_DEVICE BoundaryHit intersect(const BoundaryRay& ray) const noexcept
+    HOST_DEVICE BoundaryHit intersect(
+        const BoundaryRay& ray,
+        detail::BoundarySolveDiagnostics* diagnostic = nullptr) const noexcept
     {
+        if(diagnostic != nullptr) *diagnostic = {};
         BoundaryHit hit{};
-        const auto root=detail::solve_surface<float>(shape,ray);
+        const auto root=detail::solve_surface<float>(shape,ray,
+            diagnostic != nullptr ? &diagnostic->fp32 : nullptr);
+        if(diagnostic != nullptr) diagnostic->fp32.result = root.code;
         bool fallback=root.code==BoundaryCode::Unresolved;
         float distance=root.distance;
         if(root.code==BoundaryCode::Hit)
@@ -203,7 +339,10 @@ struct RaindropIntersector
         hit.code=root.code;
         if(fallback)
         {
-            const auto precise=detail::solve_surface<double>(shape,ray);
+            if(diagnostic != nullptr) diagnostic->used_fp64 = true;
+            const auto precise=detail::solve_surface<double>(shape,ray,
+                diagnostic != nullptr ? &diagnostic->fp64 : nullptr);
+            if(diagnostic != nullptr) diagnostic->fp64.result = precise.code;
             hit.code=precise.code;
             distance=static_cast<float>(precise.distance);
             hit.diagnostics|=IntersectionFallback;

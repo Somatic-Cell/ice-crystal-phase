@@ -3,6 +3,7 @@
 #include <rainbow/vec3.hpp>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 
 namespace rainbow
 {
@@ -40,12 +41,27 @@ struct RaindropShape
                 shape.coefficients[k]=::fmaf(t,rows[upper][k]-rows[upper-1][k],rows[upper-1][k]);
         }
         // |T_n(mu)|<=1．幾何そのものの近似でなく，保守的な包囲球だけに使う．
-        float absolute_sum=0.0f;
-        for(unsigned k=1;k<8;++k)
-            absolute_sum=::nextafterf(absolute_sum+::fabsf(shape.coefficients[k]),INFINITY);
-        const float center=1.0f+shape.coefficients[0];
-        shape.inner_radius=::nextafterf(center-absolute_sum-0x1p-20f,-INFINITY);
-        shape.outer_radius=::nextafterf(center+absolute_sum+0x1p-20f,INFINITY);
+        constexpr float infinity =
+            std::numeric_limits<float>::infinity();
+
+        float absolute_sum = 0.0f;
+
+        for(unsigned k = 1; k < 8; ++k)
+        {
+            absolute_sum = ::nextafterf(
+                absolute_sum + ::fabsf(shape.coefficients[k]),
+                infinity);
+        }
+
+        const float center = 1.0f + shape.coefficients[0];
+
+        shape.inner_radius = ::nextafterf(
+            center - absolute_sum - 0x1p-20f,
+            -infinity);
+
+        shape.outer_radius = ::nextafterf(
+            center + absolute_sum + 0x1p-20f,
+            infinity);
         result=shape;
         return true;
     }

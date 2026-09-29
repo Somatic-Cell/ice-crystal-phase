@@ -8,4 +8,5 @@ build\Debug\rainbow_trace.exe ^
     --radius-mm 1.0 ^
     --grid 129 ^
     --inclination-deg 20 ^
-    --polarization x
+    --polarization x ^
+    > outputs\drop_diagnostics.log 2>&1
