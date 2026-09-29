@@ -9,4 +9,6 @@ build\Debug\rainbow_trace.exe ^
     --grid 129 ^
     --inclination-deg 20 ^
     --polarization x ^
+    --patch-module build\Debug\modules\patch_build.fatbin ^
+    --patch-csv outputs\drop_1mm_x_patches.csv
     > outputs\drop_diagnostics.log 2>&1

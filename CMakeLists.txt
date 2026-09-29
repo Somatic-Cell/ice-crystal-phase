@@ -196,6 +196,7 @@ target_include_directories(
 )
 
 include("${PROJECT_SOURCE_DIR}/cmake/raindrop_trace.cmake")
+include("${PROJECT_SOURCE_DIR}/cmake/patch_build.cmake")
 # -----------------------------------------------------------------------------
 # Build ordering
 # -----------------------------------------------------------------------------

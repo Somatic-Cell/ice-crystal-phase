@@ -10,46 +10,84 @@
 namespace rainbow
 {
 
-enum TraceDiagnostic : std::uint32_t { NoDiagnostic=0, IntersectionFallback=1, SnellFallback=2 };
+// 診断用
+enum TraceDiagnostic : std::uint32_t { 
+    NoDiagnostic=0, 
+    IntersectionFallback=1,     // 交差判定でのフォールバック
+    SnellFallback=2             // 屈折の計算でのフォールバック
+};
 
-enum class PathFamily : std::uint32_t { R=0, TT=1, TRT=2, TRRT=3 };
+// Sadeghi 2012 は R, TT, TRT, TRRT の 4 タイプしか扱わない
+enum class PathFamily : std::uint32_t { 
+    R=0, 
+    TT=1, 
+    TRT=2, 
+    TRRT=3 
+};
+
+// 頂点の状態
 enum class VertexStatus : std::uint32_t
 {
-    Unwritten=0, Valid=1, Miss=2, TotalInternalReflection=3,
-    UnresolvedIntersection=4, InvalidInterface=5, PhaseOverflow=6
+    Unwritten=0, 
+    Valid=1,                    // 無事に追跡が終わった頂点
+    Miss=2,                     // プライマリヒットしなかったシルエット外の頂点
+    TotalInternalReflection=3,  // 内部反射
+    UnresolvedIntersection=4,   // 
+    InvalidInterface=5,         //
+    PhaseOverflow=6             // 
 };
+
+// パッチのノードの構造体
 struct OutgoingVertex
 {
     Vec3 position_drop{};       // 無次元．world/mm へ移さず後段へ渡す．
     Vec3 direction_drop{};
-    Vec3 basis_x{};             // basis_y = direction_drop x basis_x．
-    Field32 field{};            // 伝播・焦線位相，patch の面積比は未適用．
+    Vec3 basis_x{};             // basis_y は direction_drop と basis_x の外積で求まり，自明なので保持しない
+    Field32 field{};            // 伝播・焦線位相，patch の面積比は未適用
     PhaseCycles optical_cycles{};
     VertexStatus status=VertexStatus::Unwritten;
-    std::uint32_t diagnostics=0;
+    std::uint32_t diagnostics=TraceDiagnostic::NoDiagnostic;
 };
+
+
 static_assert(sizeof(OutgoingVertex)==68 && alignof(OutgoingVertex)==4);
 static_assert(std::is_trivially_copyable_v<OutgoingVertex>);
 static_assert(std::is_standard_layout_v<OutgoingVertex>);
 
-// shape / 格子配置は全 vertex 共通．一つの入射 Jones 状態を決定論的に追跡する．
+// 雨粒の形状などのグローバルな情報．
+// 一つの入射ビームを決定論的に追跡する
 struct RaindropTraceConfig
 {
+    // 形状
     RaindropShape shape{};
+    
+    // 入射 Jones ベクトル
     Vec3 incident_direction{1,0,0};
     Vec3 incident_basis_x{0,0,1};
     Field32 incident_field{{1,0},{0,0}};
+    
+    // 
     float radius_mm=0.4f;
+    
+    // 追跡する波長
     float wavelength_nm=700.0f;
+    
+    // 屈折率 (外: 空気, 内: 水)
     float exterior_index=1.0f;
     float interior_index=1.3314f;
+    
+    // 
     float grid_half_extent=1.01f;
     float reference_distance=2.0f;
     float outgoing_reference_distance=2.0f;
+    
+    // 入射ビームの離散化情報
     std::uint32_t grid_width=129;
     std::uint32_t grid_height=129;
     HOST_DEVICE std::uint32_t vertex_count() const noexcept {return grid_width*grid_height;}
 };
+
+
 static_assert(sizeof(RaindropTraceConfig)==116);
 static_assert(std::is_trivially_copyable_v<RaindropTraceConfig>);
 static_assert(std::is_standard_layout_v<RaindropTraceConfig>);
@@ -63,6 +101,7 @@ struct alignas(8) RaindropTraceParams
     std::uint64_t traversable;
     const RaindropTraceConfig* config;
 };
+
 static_assert(sizeof(void*)==8, "This project requires a 64-bit build.");
 static_assert(sizeof(RaindropTraceParams)==24);
 static_assert(alignof(RaindropTraceParams)==8);

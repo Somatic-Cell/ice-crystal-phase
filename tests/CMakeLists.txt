@@ -71,3 +71,4 @@ foreach(test_suite IN ITEMS field phase)
 endforeach()
 
 include("${CMAKE_CURRENT_LIST_DIR}/raindrop_trace_tests.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/patch_build_tests.cmake")

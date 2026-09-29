@@ -39,6 +39,10 @@ public:
     void write_csv(const std::filesystem::path& output_path, std::span<const OutgoingVertex> output) const;
     [[nodiscard]] const DeviceBuffer<OutgoingVertex>& vertices() const noexcept {return vertices_;}
     [[nodiscard]] const RaindropTraceConfig& config() const noexcept {return config_;}
+    [[nodiscard]] const OptixContext& optix_context() const noexcept
+    {
+        return optix_context_;
+    }
     [[nodiscard]] bool close_noexcept() noexcept;
     void close();
 private:

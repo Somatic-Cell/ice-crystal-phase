@@ -8,9 +8,9 @@
 namespace rainbow
 {
 
-// Sadeghi 2012 Eq.(1), Table I (p.5)．座標は等体積球半径 a で割った無次元座標．
-// +y を上，gravity を -y とし，表の極角 theta は -y 軸から測る．
-// この規約で負の奇数次係数が下側の扁平化を表す．c0 も和に含める．
+// Sadeghi 2012 Eq.(1), Table I (p.5) を参考にした値．座標は等体積球半径 a で割った無次元座標
+// 重力のはたらく方向を -y とし，表の極角 theta は -y 軸から測る
+// この規約で負の奇数次係数が下側の扁平化を表す
 struct RaindropShape
 {
     float coefficients[8] = {};

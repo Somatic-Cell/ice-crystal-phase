@@ -1,4 +1,5 @@
 #include <rainbow/raindrop_tracer.hpp>
+#include <rainbow/patch_accel.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -17,6 +18,7 @@ namespace
 struct TraceCommandLine
 {
     std::filesystem::path module_path,output_path;
+    std::filesystem::path patch_module_path,patch_csv_path;
     rainbow::RaindropSettings settings;
 
     template<class Char> static TraceCommandLine parse(const int argc,Char* argv[])
@@ -24,7 +26,8 @@ struct TraceCommandLine
         if(argc<3) throw std::invalid_argument(
             "Usage: rainbow_trace <raindrop_trace.optixir> <vertices.csv> [--radius-mm value] "
             "[--grid count] [--inclination-deg value] [--azimuth-deg value] "
-            "[--wavelength-nm value --ior value] [--polarization x|y] [--sphere]");
+            "[--wavelength-nm value --ior value] [--polarization x|y] [--sphere] "
+            "[--patch-module patch_build.fatbin] [--patch-csv patches.csv]");
         TraceCommandLine command;
         command.module_path=std::filesystem::path(argv[1]);
         command.output_path=std::filesystem::path(argv[2]);
@@ -46,6 +49,11 @@ struct TraceCommandLine
             const std::string option=ascii(argv[i]);
             if(option=="--sphere"){command.settings.force_sphere=true;continue;}
             if(++i>=argc)throw std::invalid_argument("Missing option value.");
+            // Path values keep the native character type (including Japanese paths).
+            if(option=="--patch-module")
+            {command.patch_module_path=std::filesystem::path(argv[i]);continue;}
+            if(option=="--patch-csv")
+            {command.patch_csv_path=std::filesystem::path(argv[i]);continue;}
             const std::string value=ascii(argv[i]);
             if(option=="--polarization")
             {
@@ -72,6 +80,12 @@ struct TraceCommandLine
             else if(option=="--azimuth-deg")azimuth=number;
             else throw std::invalid_argument("Unknown option: "+option);
         }
+        if(!command.patch_csv_path.empty() && command.patch_module_path.empty())
+            throw std::invalid_argument("--patch-csv requires --patch-module.");
+        if(!command.patch_csv_path.empty()
+           && std::filesystem::absolute(command.patch_csv_path).lexically_normal()
+              ==std::filesystem::absolute(command.output_path).lexically_normal())
+            throw std::invalid_argument("Vertex CSV and patch CSV must have different paths.");
         if(wavelength_given&&!index_given)
             throw std::invalid_argument("Specify --ior together with --wavelength-nm; no water dispersion fit is silently assumed.");
         if(std::abs(inclination)>90||std::abs(azimuth)>360)
@@ -115,9 +129,39 @@ template<class Char> int run(const int argc,Char* argv[])
             std::cout<<names[family]<<": valid="<<histogram[1]<<", miss="<<histogram[2]
                 <<", TIR="<<histogram[3]<<", numerical_failures="<<failed<<", fallback="<<fallback<<'\n';
         }
-        tracer.close();
         std::cout<<"Saved "<<command.output_path<<" (outgoing vertices, NOT a phase-function LUT).\n";
         if(errors){std::cerr<<"Unresolved vertices remain; inspect status/diagnostics before patch construction.\n";return EXIT_FAILURE;}
+
+        if(!command.patch_module_path.empty())
+        {
+            // The tracer and its vertices outlive PatchAccel. No re-upload of
+            // the CSV/readback vertices: build() consumes the existing GPU buffer.
+            rainbow::PatchAccel patches(cuda_context,tracer.optix_context());
+            patches.load_module(command.patch_module_path);
+            patches.build(tracer.vertices(),tracer.config());
+            const auto& stats=patches.statistics();
+            using Status=rainbow::PatchCellStatus;
+            std::cout<<"Patch geometry: logical_cells="<<stats.logical_cell_count
+                <<", stored_patches="<<stats.patch_count
+                <<", regular_positive="<<stats.count(Status::RegularPositive)
+                <<", regular_negative="<<stats.count(Status::RegularNegative)
+                <<", needs_refinement="<<stats.count(Status::NeedsRefinement)
+                <<", missing_corners="<<stats.count(Status::MissingCorners)
+                <<", no_outgoing_corners="<<stats.count(Status::NoOutgoingCorners)
+                <<", invalid_vertices="<<stats.count(Status::InvalidVertex)
+                <<", invalid_geometry="<<stats.count(Status::InvalidGeometry)<<'\n';
+            std::cout<<"Patch GAS: bytes="<<stats.gas_byte_size
+                <<", nonempty="<<(patches.handle()!=0)<<'\n';
+            std::cout<<"This is geometric assembly, NOT optical completion: "
+                <<"boundary cells and nonregular maps are retained for later resolution.\n";
+            if(!command.patch_csv_path.empty())
+            {
+                patches.write_csv(command.patch_csv_path);
+                std::cout<<"Saved "<<command.patch_csv_path<<" (all logical cell statuses).\n";
+            }
+            patches.close();
+        }
+        tracer.close();
         return EXIT_SUCCESS;
     }
     catch(const std::exception& e){std::cerr<<"Error: "<<e.what()<<'\n';return EXIT_FAILURE;}

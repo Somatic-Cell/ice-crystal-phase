@@ -55,7 +55,7 @@ Warning: Program is doing double precision computations. No source location avai
 Warning: Program is doing double precision computations. No source location available. The input PTX may not contain debug information (nvcc option: -lineinfo), OptixModuleCompileOptions::debugLevel set to OPTIX_COMPILE_DEBUG_LEVEL_NONE, or no useful information is present for the current block.
 Warning: Program is doing double precision computations. No source location available. The input PTX may not contain debug information (nvcc option: -lineinfo), OptixModuleCompileOptions::debugLevel set to OPTIX_COMPILE_DEBUG_LEVEL_NONE, or no useful information is present for the current block.
 Warning: Program is doing double precision computations. No source location available. The input PTX may not contain debug information (nvcc option: -lineinfo), OptixModuleCompileOptions::debugLevel set to OPTIX_COMPILE_DEBUG_LEVEL_NONE, or no useful information is present for t
-[optixModuleCreate(raindrop) log truncated, required 1025600 bytes]
+[optixModuleCreate(raindrop) log truncated, required 404870 bytes]
 [optixPipelineCreate(raindrop)]
 Info: Pipeline statistics
 	module(s)                            :     1
@@ -63,40 +63,13 @@ Info: Pipeline statistics
 	trace call(s)                        :     2
 	continuation callable call(s)        :     0
 	direct callable call(s)              :     0
-	basic block(s) in entry functions    :  2049
-	instruction(s) in entry functions    : 14079
+	basic block(s) in entry functions    :  1150
+	instruction(s) in entry functions    :  8892
 	non-entry function(s)                :     0
 	basic block(s) in non-entry functions:     0
 	instruction(s) in non-entry functions:     0
 	debug information                    :    no
 
-[drop/query] vertex=6703 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.0657444
-[drop/query] vertex=6583 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.0657444
-[drop/query] vertex=5168 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.07317448
-[drop/query] vertex=5280 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.07317448
-[drop/query] vertex=4911 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.07572794
-[drop/query] vertex=5021 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.07572794
-[drop/query] vertex=13045 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.01058006
-[drop/query] vertex=13141 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.01058006
-[drop/query] vertex=13565 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.01563215
-[drop/query] vertex=13653 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.01563215
-[drop/query] vertex=3884 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.09652829
-[drop/query] vertex=3984 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.09652829
-[drop/query] vertex=14419 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.00363421
-[drop/query] vertex=14347 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.00363421
-[drop/query] vertex=15556 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.96666789
-[drop/query] vertex=15532 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.96666789
-[drop/query] vertex=15432 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.99432361
-[drop/query] vertex=15398 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.99432361
-[drop/query] vertex=14086 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.01031899
-[drop/query] vertex=14164 inside=0 code=1 closest_hit=1 diagnostics=1 distance=2.01031899
-[drop/query] vertex=15670 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.98520672
-[drop/query] vertex=15671 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.96711171
-[drop/query] vertex=15672 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.95911562
-[drop/query] vertex=15673 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.95670402
-[drop/query] vertex=15674 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.95911562
-[drop/query] vertex=15675 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.96711171
-[drop/query] vertex=15676 inside=0 code=1 closest_hit=1 diagnostics=1 distance=1.98520672
 R: valid=11290, miss=5351, TIR=0, numerical_failures=0, fallback=27
 TT: valid=11264, miss=5351, TIR=26, numerical_failures=0, fallback=27
 TRT: valid=10805, miss=5351, TIR=485, numerical_failures=0, fallback=27
