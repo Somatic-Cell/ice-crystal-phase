@@ -134,37 +134,13 @@ template<class Char> int run(const int argc,Char* argv[])
     try
     {
         const auto command = TraceCommandLine::parse(argc, argv);
+        
         rainbow::CudaContext cuda_context{0};
         rainbow::RaindropTracer tracer(cuda_context);
-        // 構築時点では GPU バッファを確保しない．
-        // 逆順に破棄されるため，query → patches → tracer → CUDA の順になる．
-        rainbow::PatchAccel patches(cuda_context, tracer.optix_context());
-        rainbow::PatchQuery query(cuda_context, tracer.optix_context());
-
-        // 診断用：同じ二つの pipeline を，前回とは逆の順序で作成する．
-        // オブジェクトの所有関係・寿命・追跡処理は変更しない．
-        if(!command.query_module_path.empty())
-        {
-            std::cerr << "[stage] create query pipeline first\n";
-        
-            query.create_pipeline(command.query_module_path);
-        
-            std::cerr << "[stage] query pipeline created\n";
-        }
-        
-        std::cerr << "[stage] create raindrop pipeline\n";
         
         tracer.create_pipeline(command.module_path);
-        
-        std::cerr << "[stage] all requested pipelines created\n";
-        
-        // 追跡は，引き続き必要な pipeline をすべて作成した後に開始する．
         tracer.trace(command.settings);
-        // const auto command=TraceCommandLine::parse(argc,argv);
-        // rainbow::CudaContext cuda_context{0};
-        // rainbow::RaindropTracer tracer(cuda_context);
-        // tracer.create_pipeline(command.module_path);
-        // tracer.trace(command.settings);
+        
         // 診断があっても CSV に保存する．数値失敗は成功とせず exit code 1 で通知する．
         const auto vertices=tracer.download_vertices();
         tracer.write_csv(command.output_path,std::span<const rainbow::OutgoingVertex>{vertices});
@@ -193,7 +169,8 @@ template<class Char> int run(const int argc,Char* argv[])
         {
             // The tracer and its vertices outlive PatchAccel. No re-upload of
             // the CSV/readback vertices: build() consumes the existing GPU buffer.
-            // rainbow::PatchAccel patches(cuda_context,tracer.optix_context());
+            rainbow::PatchAccel patches(cuda_context,tracer.optix_context());
+            
             patches.load_module(command.patch_module_path);
             patches.build(tracer.vertices(),tracer.config());
             const auto& stats=patches.statistics();
@@ -219,10 +196,12 @@ template<class Char> int run(const int argc,Char* argv[])
             if(!command.query_module_path.empty())
             {
                 // patches と tracer は query より長く生存する．GAS は再構築しない．
-                // rainbow::PatchQuery query(cuda_context,tracer.optix_context());
-                // query.create_pipeline(command.query_module_path);
+                rainbow::PatchQuery query(cuda_context,tracer.optix_context());
+                query.create_pipeline(command.query_module_path);
+                
                 query.query_grid(patches,tracer.config(),command.query_theta,command.query_phi);
                 query.write_csv(command.query_csv_path);
+                
                 if(!command.query_hits_csv_path.empty())query.write_hits_csv(command.query_hits_csv_path);
                 const auto& q=query.statistics();
                 std::cout<<"Patch query: directions="<<q.directions<<", nonempty="<<q.nonempty_directions
@@ -234,13 +213,11 @@ template<class Char> int run(const int argc,Char* argv[])
                 std::cout<<"Saved "<<command.query_csv_path<<" (geometric hit counts, NOT a phase function).\n";
                 std::cout<<"Missing source cells / boundary ownership / nonregular optical evaluation remain pending.\n";
                 const bool failed=q.error_directions!=0;
-                // query.close();
+                query.close();
                 if(failed)throw std::runtime_error("Unresolved patch query directions remain; see CSV flags.");
             }
-            // patches.close();
+            patches.close();
         }
-        query.close();
-        patches.close();
         tracer.close();
         return EXIT_SUCCESS;
     }
