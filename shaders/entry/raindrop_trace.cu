@@ -1,6 +1,7 @@
 #include <optix.h>
 #include <rainbow/raindrop_paths.hpp>
 
+// GPU 側から見えるパラメータ
 extern "C"
 {
 __constant__ rainbow::RaindropTraceParams raindrop_trace_params;

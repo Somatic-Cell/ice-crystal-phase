@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstddef>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -96,6 +97,17 @@ void PatchQuery::create_pipeline(const std::filesystem::path& path)
     log.check(result,"optixProgramGroupCreate(query hitgroup)");
     OptixProgramGroup groups[]={raygen_,miss_,hitgroup_};
     OptixPipelineLinkOptions link{};link.maxTraceDepth=1;
+    // 診断用：リンク開始前の GPU 空きメモリを記録する．
+    std::size_t free_bytes = 0;
+    std::size_t total_bytes = 0;
+
+    RAINBOW_CUDA_CHECK(cuMemGetInfo(&free_bytes, &total_bytes));
+
+    std::fprintf(
+        stderr,
+        "[query/link-memory] free_bytes=%zu total_bytes=%zu\n",
+        free_bytes,
+        total_bytes);
     log.reset();result=optixPipelineCreate(optix_context_.handle(),&po,&link,groups,3,
         log.data(),log.size_address(),&pipeline_);
     log.check(result,"optixPipelineCreate(patch query)");
