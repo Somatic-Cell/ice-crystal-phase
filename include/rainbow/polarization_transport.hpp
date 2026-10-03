@@ -91,8 +91,10 @@ struct PolarizationTransport
             return false;
         }
 
-        const DVec3 source_w = source_direction.cast<double>();
-        const DVec3 target_w = target_direction.cast<double>();
+        // FP32 の単位長誤差を持ち越さないよう，変換後に FP64 で再正規化する．
+        // 最小回転の式と反対方向の判定は，単位ベクトルを前提にする．
+        const DVec3 source_w = source_direction.cast<double>().normalized();
+        const DVec3 target_w = target_direction.cast<double>().normalized();
         const double cosine = source_w.dot(target_w);
 
         // There is no unique shortest rotation for antipodal directions.

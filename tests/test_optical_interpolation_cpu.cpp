@@ -173,6 +173,34 @@ void test_scattering_frame()
     require(close(frame.e0.dot(expected),1.0f,3.0e-6f),"scattering perpendicular axis is wrong");
 }
 
+void test_polarization_antipodal_rejection()
+{
+    constexpr float h = 0x1.6a09e6p-1f;
+
+    const Vec3 source_w{h, h, 0.0f};
+    const Vec3 target_w = -source_w;
+
+    const auto source_frame = TransverseFrame::from_direction(source_w);
+    const auto target_frame = TransverseFrame::from_direction(target_w);
+
+    const Field32 field{{1.0f, 0.0f}, {0.0f, 0.0f}};
+    const Field32 sentinel{{3.0f, 0.25f}, {-2.0f, 0.5f}};
+    Field32 out = sentinel;
+
+    require(
+        !PolarizationTransport::try_transport(
+            source_w, source_frame, field,
+            target_w, target_frame, out),
+        "Antipodal transport must be rejected.");
+
+    require(
+        out.x.real == sentinel.x.real
+            && out.x.imag == sentinel.x.imag
+            && out.y.real == sentinel.y.real
+            && out.y.imag == sentinel.y.imag,
+        "Rejected transport modified output.");
+}
+
 }
 
 int main()
@@ -187,6 +215,7 @@ int main()
         test_polarization_known_rotation();
         test_polarization_gauge_invariance();
         test_scattering_frame();
+        test_polarization_antipodal_rejection();
         std::cout<<"Optical interpolation CPU tests: passed\n";
         return EXIT_SUCCESS;
     }
