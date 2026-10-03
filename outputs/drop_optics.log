@@ -1,0 +1,81 @@
+[OptiX][4][KNOBS] All OptiX knobs on default.
+
+[OptiX][4][DISKCACHE] Opened database: "C:\Users\sy415\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "479.7 MiB"
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-179756-key3844d21fb4c92f9e9748857639e01edd-sm_86-rtc1-drv617.14
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     4
+	trace call(s)                        :     2
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  1144
+	instruction(s) in entry functions    :  8818
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[optixPipelineCreate(raindrop)]
+Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     4
+	trace call(s)                        :     2
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :  1144
+	instruction(s) in entry functions    :  8818
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Cache hit for key: ptx-66132-key91d32cfbc3692a6e7d4794b775b3c9b8-sm_86-rtc1-drv617.14
+
+[OptiX][4][COMPILER] 
+[OptiX][4][COMPILER] Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     4
+	trace call(s)                        :     1
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   234
+	instruction(s) in entry functions    :  2638
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[optixPipelineCreate(patch query)]
+Info: Pipeline statistics
+	module(s)                            :     1
+	entry function(s)                    :     4
+	trace call(s)                        :     1
+	continuation callable call(s)        :     0
+	direct callable call(s)              :     0
+	basic block(s) in entry functions    :   234
+	instruction(s) in entry functions    :  2638
+	non-entry function(s)                :     0
+	basic block(s) in non-entry functions:     0
+	instruction(s) in non-entry functions:     0
+	debug information                    :    no
+
+[OptiX][4][DISKCACHE] Closed database: "C:\Users\sy415\AppData\Local\NVIDIA\OptixCache\optix7cache.db"
+[OptiX][4][DISKCACHE]     Cache data size: "479.7 MiB"
+R: valid=11290, miss=5351, TIR=0, numerical_failures=0, fallback=27
+TT: valid=11264, miss=5351, TIR=26, numerical_failures=0, fallback=27
+TRT: valid=10805, miss=5351, TIR=485, numerical_failures=0, fallback=27
+TRRT: valid=11214, miss=5351, TIR=76, numerical_failures=0, fallback=27
+Saved "outputs\\drop_1mm_x.csv" (outgoing vertices, NOT a phase-function LUT).
+Patch geometry: logical_cells=65536, stored_patches=43622, regular_positive=23642, regular_negative=19700, needs_refinement=280, missing_corners=1910, no_outgoing_corners=20004, invalid_vertices=0, invalid_geometry=0
+Patch GAS: bytes=1634048, nonempty=1
+This is geometric assembly, NOT optical completion: boundary cells and nonregular maps are retained for later resolution.
+Saved "outputs\\drop_1mm_x_patches.csv" (all logical cell statuses).
+Patch query: directions=16200, nonempty=16200, intersections=37298, max_hits=3, unresolved_or_error_directions=0, refinement_directions=12, boundary_directions=0, fp64_directions=5950
+Saved "outputs\\drop_1mm_x_queries.csv" (geometric hit counts, NOT a phase function).
+Missing source cells / boundary ownership / nonregular optical evaluation remain pending.
+Patch optics: directions=16200, known_hits_complete_directions=16188, pending_directions=12, error_directions=0, evaluated_hits=37286, rejected_hits=12
+Saved "outputs\\drop_1mm_x_optics.csv" (regular partial optical densities, NOT a complete phase function).
+Focal-line phase, diffraction, source coverage and boundary ownership remain pending.

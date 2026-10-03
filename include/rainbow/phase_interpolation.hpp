@@ -62,6 +62,9 @@ struct PhaseInterpolation
     }
 
 private:
+    // Scalar constants, avoiding host-only numeric_limits calls in device code.
+    static constexpr std::int64_t minimum_turns = -2147483647LL - 1LL;
+    static constexpr std::int64_t maximum_turns = 2147483647LL;
     [[nodiscard]]
     HOST_DEVICE static double difference(
         const PhaseCycles lhs,
@@ -112,8 +115,8 @@ private:
             fraction -= 1.0;
         }
 
-        if(turns < static_cast<std::int64_t>((std::numeric_limits<std::int32_t>::min)())
-           || turns > static_cast<std::int64_t>((std::numeric_limits<std::int32_t>::max)()))
+        if(turns < minimum_turns
+           || turns > maximum_turns)
         {
             return false;
         }
@@ -124,7 +127,7 @@ private:
         {
             ++turns;
             stored_fraction = 0.0f;
-            if(turns > static_cast<std::int64_t>((std::numeric_limits<std::int32_t>::max)()))
+            if(turns > maximum_turns)
             {
                 return false;
             }
@@ -133,7 +136,7 @@ private:
         {
             --turns;
             stored_fraction += 1.0f;
-            if(turns < static_cast<std::int64_t>((std::numeric_limits<std::int32_t>::min)()))
+            if(turns < minimum_turns)
             {
                 return false;
             }

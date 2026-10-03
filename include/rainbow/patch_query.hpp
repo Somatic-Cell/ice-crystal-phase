@@ -45,6 +45,25 @@ public:
     void query_grid(const PatchAccel& patches,const RaindropTraceConfig& source,
         std::uint32_t theta_count,std::uint32_t phi_count);
 
+    // Read-only access for synchronous downstream optical evaluation.
+    [[nodiscard]] bool has_result() const noexcept { return has_result_; }
+    [[nodiscard]] const DeviceBuffer<Vec3>& directions() const noexcept { return directions_; }
+    [[nodiscard]] const std::vector<Vec3>& host_directions() const noexcept { return host_directions_; }
+    [[nodiscard]] const QueryDirectionGrid* direction_grid() const noexcept
+    { return has_grid_ ? &grid_ : nullptr; }
+    [[nodiscard]] bool matches_source(const PatchAccel& source) const noexcept
+    {
+        // An empty direction set has no referenced geometry. For nonempty
+        // results this checks identity/layout, not in-place changes or address
+        // reuse. Do not retrace/rebuild before the downstream consumer finishes.
+        return has_result_ && source.has_result()
+            && (host_directions_.empty()
+                || (params_.vertices == reinterpret_cast<const OutgoingVertex*>(source.source_vertices_address())
+                    && params_.patches == reinterpret_cast<const OutgoingPatch*>(source.patches().address())
+                    && params_.traversable == static_cast<std::uint64_t>(source.handle())
+                    && params_.patch_count == source.statistics().patch_count
+                    && params_.vertex_count == source.layout().vertices_per_path * 4u));
+    }
     [[nodiscard]] const PatchQueryStatistics& statistics() const noexcept {return statistics_;}
     [[nodiscard]] const DeviceBuffer<PatchQueryHit>& hits() const noexcept {return hits_;}
     [[nodiscard]] const DeviceBuffer<std::uint64_t>& offsets() const noexcept {return offsets_;}
