@@ -27,15 +27,8 @@ OptixContext::OptixContext(const CudaContext& cuda_context):cuda_context_(cuda_c
     options.logCallbackFunction=&log_callback;
     options.logCallbackLevel=4;
 #ifndef NDEBUG
-    // 一時診断：二つの pipeline のリンク失敗と，
-    // OptiX validation mode の関係を切り分ける．
-    // 通常の Debug 設定は VALIDATION_MODE_ALL．
     options.validationMode =
         OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_OFF;
-
-    std::fprintf(
-        stderr,
-        "[context] validation=OFF (pipeline link diagnostic)\n");
 #endif
     RAINBOW_OPTIX_CHECK(optixDeviceContextCreate(cuda_context_.handle(),&options,&context_));
 }
