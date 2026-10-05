@@ -1,0 +1,4 @@
+# Python >= 3.10. Mie API version is pinned for reproducible comparisons.
+numpy>=1.26,<3
+matplotlib>=3.8,<4
+miepython==3.3.0

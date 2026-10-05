@@ -1,6 +1,7 @@
 #pragma once
 
 #include <rainbow/patch_optics_data.hpp>
+#include <rainbow/focal_phase.hpp>
 #include <rainbow/phase_interpolation.hpp>
 #include <rainbow/polarization_transport.hpp>
 #include <cmath>
@@ -101,9 +102,19 @@ struct PatchOpticalEvaluator
     }
 
     [[nodiscard]] HOST_DEVICE static PatchOpticalResult evaluate_direction(
-        const PatchOpticsParams& input, const std::uint32_t index) noexcept
+        const PatchOpticsParams& input, const std::uint32_t index,
+        const FocalPhaseConfig* focal_config = nullptr,
+        FocalOpticalResult* focal_output = nullptr) noexcept
     {
         PatchOpticalResult result{};
+        // Companion output is invalid until the entire known-hit evaluation finishes.
+        // Early error exits must never leave a seemingly valid zero focal result.
+        if(focal_output)
+        {
+            *focal_output = {};
+            focal_output->flags = FocalInputError;
+            invalidate_focal(*focal_output);
+        }
         if(index >= input.direction_count || !input.directions || !input.offsets || !input.summaries)
         { result.flags = PatchOpticalInvalidInput; invalidate(result); return result; }
 
@@ -137,6 +148,11 @@ struct PatchOpticalEvaluator
           invalidate(result); return result; }
 
         Sum sr{}, si{}, pr{}, pi{}, incoherent_s{}, incoherent_p{};
+        const bool with_focal = focal_config && focal_output;
+        FocalOpticalResult focal{};
+        Sum focal_sr{}, focal_si{}, focal_pr{}, focal_pi{}, family_envelope[4]{};
+        if(with_focal && !FocalPhase::layout_valid(*focal_config)) focal.flags |= FocalInvalidGeometry;
+
         for(std::uint32_t i = 0; i < summary.hit_count; ++i)
         {
             const auto& hit = input.hits[begin + i];
@@ -163,6 +179,28 @@ struct PatchOpticalEvaluator
             sr.add(contribution.path_field.s_real); si.add(contribution.path_field.s_imag);
             pr.add(contribution.path_field.p_real); pi.add(contribution.path_field.p_imag);
             incoherent_s.add(contribution.incoherent_s); incoherent_p.add(contribution.incoherent_p);
+            if(with_focal)
+            {
+                FocalPhaseEstimate estimate{};
+                const auto code = FocalPhase::estimate(input.vertices, input.vertex_count,
+                    input.patches[hit.compact_index], input.incident_direction, *focal_config, estimate);
+                if(code != FocalNone)
+                {
+                    focal.flags |= code;
+                    if(hit.patch_id < focal.first_problem_patch_id) focal.first_problem_patch_id = hit.patch_id;
+                }
+                else
+                {
+                    const auto f = FocalPhase::apply(contribution.path_field, estimate.quarter_turns);
+                    focal_sr.add(f.s_real); focal_si.add(f.s_imag);
+                    focal_pr.add(f.p_real); focal_pi.add(f.p_imag);
+                    family_envelope[estimate.family].add(contribution.incoherent_s + contribution.incoherent_p);
+                    ++focal.family_hits[estimate.family];
+                    ++focal.corrected_hits;
+                    focal.extra_quarter_turn_hits += estimate.extra_quarter_turn;
+                }
+            }
+
         }
         result.regular_partial_path_field = {sr.value(), si.value(), pr.value(), pi.value()};
         result.regular_partial_incoherent_s = incoherent_s.value();
@@ -174,10 +212,31 @@ struct PatchOpticalEvaluator
            || !finite(result.regular_partial_path_s) || !finite(result.regular_partial_path_p))
             result.flags |= PatchOpticalArithmeticFailure;
         if(result.flags & patch_optical_error_mask) invalidate(result);
+        if(with_focal)
+        {
+            if(result.flags & patch_optical_error_mask) focal.flags |= FocalInputError;
+            if(result.flags & patch_optical_pending_mask) focal.flags |= FocalInputPending;
+            if(result.first_problem_patch_id < focal.first_problem_patch_id)
+                focal.first_problem_patch_id = result.first_problem_patch_id;
+            focal.field = {focal_sr.value(), focal_si.value(), focal_pr.value(), focal_pi.value()};
+            focal.intensity_s = ::fma(focal.field.s_real, focal.field.s_real, focal.field.s_imag * focal.field.s_imag);
+            focal.intensity_p = ::fma(focal.field.p_real, focal.field.p_real, focal.field.p_imag * focal.field.p_imag);
+            for(unsigned f = 0; f < 4; ++f) focal.family_incoherent[f] = family_envelope[f].value();
+            if(!finite_field(focal.field) || !finite(focal.intensity_s + focal.intensity_p))
+                focal.flags |= FocalArithmeticError;
+            // No complete-looking focal intensity assembled from only some hits.
+            if(!focal.valid()) invalidate_focal(focal);
+            *focal_output = focal;
+        }
         return result;
     }
 
 private:
+    HOST_DEVICE static void invalidate_focal(FocalOpticalResult& r) noexcept
+    {
+        r.field = {patch_optical_nan, patch_optical_nan, patch_optical_nan, patch_optical_nan};
+        r.intensity_s = r.intensity_p = patch_optical_nan;
+    }
     // Neumaier compensated summation. No atomic operations; one thread owns
     // one direction and consumes every hit in the existing deterministic order.
     struct Sum

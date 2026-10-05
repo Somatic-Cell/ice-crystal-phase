@@ -3,6 +3,7 @@
 #include <rainbow/cuda_module.hpp>
 #include <rainbow/device_buffer.hpp>
 #include <rainbow/patch_optics_data.hpp>
+#include <rainbow/wave_optics_data.hpp>
 #include <rainbow/query_direction_grid.hpp>
 #include <cstdint>
 #include <filesystem>
@@ -42,6 +43,14 @@ public:
     void load_module(const std::filesystem::path& fatbin_path);
     void evaluate(const PatchAccel& source, const PatchQuery& query,
                   const RaindropTraceConfig& config);
+    // Explicit new mode; the original evaluate()/write_csv() semantics remain.
+    void evaluate_wave(const PatchAccel& source, const PatchQuery& query,
+                       const RaindropTraceConfig& config, const WaveOpticsSettings& settings = {});
+    void write_wave_csv(const std::filesystem::path& path) const;
+    [[nodiscard]] bool has_wave_result() const noexcept { return has_wave_result_; }
+    [[nodiscard]] const WaveOpticsStatistics& wave_statistics() const noexcept { return wave_statistics_; }
+    [[nodiscard]] std::span<const FocalOpticalResult> host_focal_results() const noexcept { return host_focal_; }
+    [[nodiscard]] std::span<const DiffractionResult> host_diffraction_results() const noexcept { return host_diffraction_; }
     void write_csv(const std::filesystem::path& path) const;
     [[nodiscard]] bool has_result() const noexcept { return has_result_; }
     [[nodiscard]] const DeviceBuffer<PatchOpticalResult>& results() const noexcept { return results_; }
@@ -52,10 +61,22 @@ public:
 
 private:
     void synchronize();
+    void evaluate_impl(const PatchAccel&, const PatchQuery&, const RaindropTraceConfig&, const WaveOpticsSettings*);
+    void run_diffraction();
     const CudaContext& cuda_context_;
     CudaModule module_;
     CUfunction function_ = nullptr;
     DeviceBuffer<PatchOpticalResult> results_;
+    DeviceBuffer<FocalOpticalResult> focal_results_;
+    DeviceBuffer<RainbowTransition> transitions_;
+    DeviceBuffer<DiffractionResult> diffraction_results_;
+    std::vector<FocalOpticalResult> host_focal_;
+    std::vector<RainbowTransition> host_transitions_;
+    std::vector<DiffractionResult> host_diffraction_;
+    WaveOpticsSettings wave_settings_{};
+    DiffractionConfig diffraction_config_{};
+    WaveOpticsStatistics wave_statistics_{};
+    bool has_wave_result_ = false;
     std::vector<PatchOpticalResult> host_results_;
     std::vector<Vec3> host_directions_; // copy of existing HOST metadata, not GPU readback
     RaindropTraceConfig config_{};

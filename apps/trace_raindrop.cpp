@@ -23,6 +23,9 @@ struct TraceCommandLine
     std::filesystem::path patch_module_path,patch_csv_path;
     std::filesystem::path query_module_path,query_csv_path,query_hits_csv_path;
     std::filesystem::path optics_module_path,optics_csv_path;
+    std::filesystem::path wave_csv_path;
+    rainbow::WaveOpticsSettings wave_settings{};
+    bool focal_offsets_given=false, diffraction_option_given=false;
     std::uint32_t query_theta=90,query_phi=180;
     rainbow::RaindropSettings settings;
 
@@ -35,7 +38,9 @@ struct TraceCommandLine
             "[--patch-module patch_build.fatbin] [--patch-csv patches.csv] "
             "[--query-module patch_query.optixir --query-csv queries.csv] "
             "[--query-hits-csv hits.csv] [--query-theta N --query-phi N] "
-            "[--optics-module patch_optics.fatbin --optics-csv optics.csv]");
+            "[--optics-module patch_optics.fatbin --optics-csv optics.csv] "
+            "[--wave-csv wave.csv --focal-offsets R,TT,TRT,TRRT] "
+            "[--diffraction-sigma-deg value] [--diffraction-contrast value]");
         TraceCommandLine command;
         command.module_path=std::filesystem::path(argv[1]);
         command.output_path=std::filesystem::path(argv[2]);
@@ -72,7 +77,39 @@ struct TraceCommandLine
             {command.optics_module_path=std::filesystem::path(argv[i]);continue;}
             if(option=="--optics-csv")
             {command.optics_csv_path=std::filesystem::path(argv[i]);continue;}
+            if(option=="--wave-csv")
+            {command.wave_csv_path=std::filesystem::path(argv[i]);continue;}
             const std::string value=ascii(argv[i]);
+            if(option=="--focal-offsets")
+            {
+                // Require an explicit baseline convention. Not inferred from a
+                // signed patch area or silently calibrated against Mie curves.
+                if(value.size()!=7 || value[1]!=',' || value[3]!=',' || value[5]!=',')
+                    throw std::invalid_argument("focal-offsets must be four digits in 0..3, e.g. 0,0,0,0.");
+                for(unsigned j=0;j<4;++j)
+                {
+                    const char c=value[2*j];
+                    if(c<'0'||c>'3')throw std::invalid_argument("Each focal offset is 0..3 quarter-turns.");
+                    command.wave_settings.focal_quarter_turn_offsets[j]=static_cast<std::uint32_t>(c-'0');
+                }
+                command.focal_offsets_given=true;continue;
+            }
+            if(option=="--diffraction-sigma-deg" || option=="--diffraction-contrast")
+            {
+                std::size_t used=0;const double x=std::stod(value,&used);
+                if(used!=value.size() || !std::isfinite(x))throw std::invalid_argument("Expected a finite diffraction option.");
+                if(option=="--diffraction-sigma-deg")
+                {
+                    if(!(x>0))throw std::invalid_argument("Explicit diffraction sigma must be positive.");
+                    command.wave_settings.primary_sigma_degrees=x;
+                }
+                else
+                {
+                    if(!(x>=0 && x<1))throw std::invalid_argument("Diffraction contrast must be in [0,1).");
+                    command.wave_settings.transition_contrast=x;
+                }
+                command.diffraction_option_given=true;continue;
+            }
             if(option=="--polarization")
             {
                 if(value=="x")command.settings.incident_field={{1,0},{0,0}};
@@ -117,8 +154,13 @@ struct TraceCommandLine
             throw std::invalid_argument("--optics-module and --optics-csv must be specified together.");
         if(wants_optics && !wants_query)
             throw std::invalid_argument("Optical evaluation requires --query-module and --query-csv.");
-        const std::array<std::filesystem::path,5> outputs={command.output_path,command.patch_csv_path,
-            command.query_csv_path,command.query_hits_csv_path,command.optics_csv_path};
+        const bool wants_wave=!command.wave_csv_path.empty();
+        if(wants_wave && (!wants_optics || !command.focal_offsets_given))
+            throw std::invalid_argument("--wave-csv requires optical evaluation and explicit --focal-offsets R,TT,TRT,TRRT.");
+        if(!wants_wave && (command.focal_offsets_given || command.diffraction_option_given))
+            throw std::invalid_argument("Focal/diffraction options require --wave-csv.");
+        const std::array<std::filesystem::path,6> outputs={command.output_path,command.patch_csv_path,
+            command.query_csv_path,command.query_hits_csv_path,command.optics_csv_path,command.wave_csv_path};
         for(std::size_t a=0;a<outputs.size();++a)for(std::size_t b=a+1;b<outputs.size();++b)
         {
             if(outputs[a].empty() || outputs[b].empty())continue;
@@ -227,8 +269,26 @@ template<class Char> int run(const int argc,Char* argv[])
                     // are closed. No new OptiX pipeline and no CSV round trip.
                     rainbow::PatchOptics optics(cuda_context);
                     optics.load_module(command.optics_module_path);
-                    optics.evaluate(patches,query,tracer.config());
+                    if(command.wave_csv_path.empty()) optics.evaluate(patches,query,tracer.config());
+                    else optics.evaluate_wave(patches,query,tracer.config(),command.wave_settings);
                     optics.write_csv(command.optics_csv_path);
+                    bool wave_failed=false;
+                    if(!command.wave_csv_path.empty())
+                    {
+                        optics.write_wave_csv(command.wave_csv_path);
+                        const auto& w=optics.wave_statistics();
+                        std::cout<<"Wave optics: focal_errors="<<w.focal_errors<<", focal_pending="<<w.focal_pending
+                            <<", corrected_hits="<<w.corrected_hits<<", extra_quarter_turn_hits="<<w.extra_quarter_turn_hits
+                            <<", primary_transitions="<<w.primary_transitions<<", secondary_transitions="<<w.secondary_transitions
+                            <<", unknown_transitions="<<w.unknown_transitions<<", filtered_directions="<<w.filtered_directions
+                            <<", unavailable_directions="<<w.unavailable_directions<<", underresolved_directions="<<w.underresolved_directions<<'\n';
+                        std::cout<<"Saved "<<command.wave_csv_path<<" (focal and local Gaussian diffraction; source coverage remains uncertified).\n";
+                        if(w.underresolved_directions || w.filtered_directions==0u)
+                            std::cerr<<"Warning: verify angular resolution relative to the tabulated sigma; no bandwidth enlargement is performed.\n";
+                        wave_failed=w.focal_errors!=0u;
+                        for(const auto& d:optics.host_diffraction_results())
+                            wave_failed=wave_failed||((d.flags&rainbow::DiffractionInvalidData)!=0u);
+                    }
                     const auto& optical=optics.statistics();
                     std::cout<<"Patch optics: directions="<<optical.directions
                         <<", known_hits_complete_directions="<<optical.known_hits_complete_directions
@@ -238,8 +298,10 @@ template<class Char> int run(const int argc,Char* argv[])
                         <<", rejected_hits="<<optical.rejected_hits<<'\n';
                     std::cout<<"Saved "<<command.optics_csv_path
                         <<" (regular partial optical densities, NOT a complete phase function).\n";
-                    std::cout<<"Focal-line phase, diffraction, source coverage and boundary ownership remain pending.\n";
-                    failed=failed || optical.error_directions!=0;
+                    if(command.wave_csv_path.empty())
+                        std::cout<<"Focal-line phase and diffraction are not enabled in this run.\n";
+                    std::cout<<"Source coverage and boundary ownership remain uncertified.\n";
+                    failed=failed || optical.error_directions!=0 || wave_failed;
                     optics.close();
                 }
                 query.close();

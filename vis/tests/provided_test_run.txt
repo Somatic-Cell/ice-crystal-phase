@@ -1,0 +1,31 @@
+test_absolute_metrics_do_not_fit_scale (test_vis.AdapterTests.test_absolute_metrics_do_not_fit_scale) ... ok
+test_bad_weight_rejected (test_vis.AdapterTests.test_bad_weight_rejected) ... ok
+test_circular_polarization_projection (test_vis.AdapterTests.test_circular_polarization_projection) ... ok
+test_comparison_cli_requires_explicit_partial_ack (test_vis.AdapterTests.test_comparison_cli_requires_explicit_partial_ack) ... ok
+test_comparison_pipeline_with_test_double (test_vis.AdapterTests.test_comparison_pipeline_with_test_double) ... ok
+test_duplicate_id_rejected (test_vis.AdapterTests.test_duplicate_id_rejected) ... ok
+test_explicit_phase_normalized_input_rejected (test_vis.AdapterTests.test_explicit_phase_normalized_input_rejected) ... ok
+test_json_is_strict (test_vis.AdapterTests.test_json_is_strict) ... ok
+test_log_metric_does_not_floor_zero (test_vis.AdapterTests.test_log_metric_does_not_floor_zero) ... ok
+test_mie_adapter_return_order_and_area (test_vis.AdapterTests.test_mie_adapter_return_order_and_area) ... ok
+test_mie_unpolarized_axisymmetry (test_vis.AdapterTests.test_mie_unpolarized_axisymmetry) ... ok
+test_mismatched_pair_rejected (test_vis.AdapterTests.test_mismatched_pair_rejected) ... ok
+test_non_grid_format_rejected (test_vis.AdapterTests.test_non_grid_format_rejected) ... ok
+test_non_sphere_mie_rejected (test_vis.AdapterTests.test_non_sphere_mie_rejected) ... ok
+test_nonorthogonal_pair_rejected (test_vis.AdapterTests.test_nonorthogonal_pair_rejected) ... ok
+test_plot_cli_and_linear_npz (test_vis.AdapterTests.test_plot_cli_and_linear_npz) ... ok
+test_region_uses_centers_and_full_weights (test_vis.AdapterTests.test_region_uses_centers_and_full_weights) ... ok
+test_shape_weights_and_units (test_vis.AdapterTests.test_shape_weights_and_units) ... ok
+test_shuffled_rows_are_sorted_by_ids (test_vis.AdapterTests.test_shuffled_rows_are_sorted_by_ids) ... ok
+test_single_linear_polarization_projection (test_vis.AdapterTests.test_single_linear_polarization_projection) ... ok
+test_status_masks_keep_zero_and_pending_separate (test_vis.AdapterTests.test_status_masks_keep_zero_and_pending_separate) ... ok
+test_tiny_nonzero_shape_not_silently_spherical (test_vis.AdapterTests.test_tiny_nonzero_shape_not_silently_spherical) ... ok
+test_unpolarized_is_normalized_intensity_average (test_vis.AdapterTests.test_unpolarized_is_normalized_intensity_average) ... ok
+test_zero_input_rejected (test_vis.AdapterTests.test_zero_input_rejected) ... ok
+test_qsca_normalization_against_efficiency (test_vis.RealMieTests.test_qsca_normalization_against_efficiency) ... skipped 'Real miepython not installed; adapter test double is NOT Mie validation'
+test_small_sphere_against_independent_dipole_formula (test_vis.RealMieTests.test_small_sphere_against_independent_dipole_formula) ... skipped 'Real miepython not installed; adapter test double is NOT Mie validation'
+
+----------------------------------------------------------------------
+Ran 26 tests in 3.723s
+
+OK (skipped=2)
