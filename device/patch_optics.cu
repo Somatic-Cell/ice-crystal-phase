@@ -38,3 +38,31 @@ void filter_rainbow_diffraction(const rainbow::DiffractionParams params)
     if(i < std::uint64_t(params.theta_count) * params.phi_count)
         params.results[i] = rainbow::RainbowDiffraction::filter(params, static_cast<std::uint32_t>(i));
 }
+
+#include <rainbow/folded_patch_builder.hpp>
+
+// One invocation per stored primitive; only NeedsRefinement performs quadrature.
+// Slot order is irrelevant: each compact primitive receives its own lookup.
+extern "C" __global__ void prepare_folded_patches(rainbow::FoldedPrepareParams p)
+{
+    using namespace rainbow;
+    const std::uint32_t i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=p.patch_count)return;
+    p.record_indices[i]=0xffffffffu;
+    if(p.patches[i].status!=PatchCellStatus::NeedsRefinement)return;
+    const auto slot=atomicAdd(p.written_count,1u);
+    // Host checks written_count==capacity before publishing a successful result.
+    if(slot>=p.capacity)return;
+    p.record_indices[i]=slot;
+    p.records[slot]=FoldedPatchBuilder::prepare(p.vertices,p.vertex_count,p.patches[i],i,
+        p.incident_direction,p.with_focal?&p.focal:nullptr,p.config);
+}
+
+extern "C" __global__ void evaluate_folded_optics(rainbow::FoldedOpticsParams p)
+{
+    const std::uint32_t i=blockIdx.x*blockDim.x+threadIdx.x;
+    if(i>=p.wave.optical.direction_count)return;
+    p.wave.optical.results[i]=rainbow::PatchOpticalEvaluator::evaluate_direction(
+        p.wave.optical,i,p.with_focal?&p.wave.focal:nullptr,
+        p.with_focal?p.wave.focal_results+i:nullptr,p.folded);
+}

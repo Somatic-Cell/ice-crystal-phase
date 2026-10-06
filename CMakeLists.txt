@@ -199,6 +199,7 @@ include("${PROJECT_SOURCE_DIR}/cmake/raindrop_trace.cmake")
 include("${PROJECT_SOURCE_DIR}/cmake/patch_build.cmake")
 include("${PROJECT_SOURCE_DIR}/cmake/patch_query.cmake")
 include("${PROJECT_SOURCE_DIR}/cmake/patch_optics.cmake")
+include("${PROJECT_SOURCE_DIR}/cmake/patch_failure_report.cmake")
 # -----------------------------------------------------------------------------
 # Build ordering
 # -----------------------------------------------------------------------------

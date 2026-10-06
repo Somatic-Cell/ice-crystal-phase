@@ -4,19 +4,23 @@
 #include <rainbow/cuda_error.hpp>
 #include <rainbow/focal_phase.hpp>
 #include <rainbow/rainbow_diffraction.hpp>
+#include <rainbow/folded_patch_builder.hpp>
 
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <locale>
+#include <iostream>
+#include <algorithm>
 #include <stdexcept>
 
 namespace rainbow
 {
 PatchOptics::PatchOptics(const CudaContext& cuda_context) noexcept
     : cuda_context_(cuda_context), module_(cuda_context), results_(cuda_context),
-      focal_results_(cuda_context), transitions_(cuda_context), diffraction_results_(cuda_context)
+      focal_results_(cuda_context), transitions_(cuda_context), diffraction_results_(cuda_context),
+      folded_indices_(cuda_context), folded_written_(cuda_context), folded_records_(cuda_context)
 {
 }
 PatchOptics::~PatchOptics() noexcept { static_cast<void>(close_noexcept()); }
@@ -87,6 +91,8 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
     synchronize();
     has_result_ = false; has_wave_result_ = false;
     results_.close(); focal_results_.close(); transitions_.close(); diffraction_results_.close();
+    folded_indices_.close(); folded_written_.close(); folded_records_.close();
+    folded_statistics_ = {}; result_used_folded_ = false; result_folded_config_ = folded_config_;
     host_focal_.clear(); host_transitions_.clear(); host_diffraction_.clear(); wave_statistics_={};
     if(wave)
     {
@@ -104,6 +110,10 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
     statistics_.missing_source_cells = query.statistics().missing_source_cells;
     statistics_.no_outgoing_source_cells = query.statistics().no_outgoing_source_cells;
     results_.allocate(n);
+    FoldedPatchView fold_view{};
+    if(n != 0u && folded_enabled_)
+        fold_view = prepare_folded(source, focal_config, wave != nullptr);
+    result_used_folded_ = fold_view.enabled();
     if(n != 0u)
     {
         PatchOpticsParams params{};
@@ -123,7 +133,19 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
         // The kernel takes one struct BY VALUE, not a pointer to host memory.
         constexpr unsigned int threads = 128;
         const unsigned int blocks = n / threads + (n % threads != 0u ? 1u : 0u);
-        if(wave)
+        if(fold_view.enabled())
+        {
+            FoldedOpticsParams fp{};
+            fp.wave = {params, focal_config, wave ? focal_results_.data() : nullptr};
+            fp.folded = fold_view; fp.with_focal = wave ? 1u : 0u;
+            void* arguments[] = {&fp};
+            const auto f = module_.find_function("evaluate_folded_optics");
+            has_pending_work_ = true;
+            RAINBOW_CUDA_CHECK(cuLaunchKernel(f,blocks,1,1,threads,1,1,0,
+                                             cuda_context_.stream(),arguments,nullptr));
+            if(wave) run_diffraction();
+        }
+        else if(wave)
         {
             WaveOpticsParams wp{params, focal_config, focal_results_.data()};
             void* arguments[] = {&wp};
@@ -155,7 +177,9 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
         statistics_.error_directions += (r.flags & patch_optical_error_mask) != 0u;
         statistics_.evaluated_hits += r.evaluated_hits;
         statistics_.rejected_hits += r.rejected_hits;
+        folded_statistics_.evaluated_hits += r.folded_evaluated_hits();
     }
+    if(result_used_folded_) collect_folded_statistics(wave != nullptr);
     // A true result means that evaluation finished, NOT that all physics or all
     // source cells are complete. CLI inspects errors only after writing the CSV.
     has_result_ = true;
@@ -178,6 +202,85 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
         }
         has_wave_result_=true;
     }
+}
+
+void PatchOptics::set_folded_patch_config(const FoldedPatchConfig& c)
+{
+    if(!FoldedPatchBuilder::config_valid(c)) throw std::invalid_argument("Invalid folded-patch quadrature settings.");
+    folded_config_=c;
+}
+
+FoldedPatchView PatchOptics::prepare_folded(const PatchAccel& source,
+    const FocalPhaseConfig& focal,bool with_focal)
+{
+    const auto count=source.statistics().count(PatchCellStatus::NeedsRefinement);
+    if(count==0)return {};
+    if(count>(std::numeric_limits<std::uint32_t>::max)())
+        throw std::length_error("Too many nonregular patches.");
+    const auto capacity=static_cast<std::uint32_t>(count);
+    folded_statistics_.candidates=capacity;
+    folded_indices_.allocate(source.statistics().patch_count);
+    folded_records_.allocate(capacity);folded_written_.allocate(1);
+    has_pending_work_=true;
+    folded_written_.zero_byte_async(cuda_context_.stream());
+    FoldedPrepareParams p{};
+    p.vertices=reinterpret_cast<const OutgoingVertex*>(source.source_vertices_address());
+    p.patches=reinterpret_cast<const OutgoingPatch*>(source.patches().address());
+    p.vertex_count=source.layout().vertices_per_path*4u;
+    p.patch_count=source.statistics().patch_count;p.capacity=capacity;
+    p.record_indices=folded_indices_.data();p.records=folded_records_.data();
+    p.written_count=folded_written_.data();p.incident_direction=config_.incident_direction;
+    p.focal=focal;p.with_focal=with_focal?1u:0u;p.config=folded_config_;
+    void* args[]={&p};constexpr unsigned threads=32;
+    const unsigned blocks=p.patch_count/threads+(p.patch_count%threads!=0u?1u:0u);
+    const auto function=module_.find_function("prepare_folded_patches");
+    has_pending_work_=true;
+    RAINBOW_CUDA_CHECK(cuLaunchKernel(function,blocks,1,1,threads,1,1,0,
+                                     cuda_context_.stream(),args,nullptr));
+    return {folded_indices_.data(),folded_records_.data(),p.patch_count,capacity};
+}
+
+void PatchOptics::collect_folded_statistics(bool with_focal)
+{
+    std::uint32_t written=0;
+    folded_written_.download(std::span<std::uint32_t>{&written,1});
+    if(written!=folded_statistics_.candidates)
+        throw std::runtime_error("Folded-patch count disagrees with source classification; optical result is not published.");
+    std::vector<FoldedPatchRecord> records(written);folded_records_.download(records);
+    for(const auto& r:records)
+    {
+        if(r.flags!=FoldedReady){++folded_statistics_.unresolved;continue;}
+        ++folded_statistics_.prepared;folded_statistics_.branch_count+=r.branch_count;
+        folded_statistics_.largest_estimated_relative_error=(std::max)(
+            folded_statistics_.largest_estimated_relative_error,r.largest_estimated_relative_error);
+        for(unsigned i=0;with_focal && i<r.branch_count;++i)
+            folded_statistics_.focal_pending_branches+=r.branches[i].focal_flags!=FocalNone;
+    }
+    std::clog << "Folded patches: candidates=" << folded_statistics_.candidates
+        << ", prepared=" << folded_statistics_.prepared
+        << ", unresolved=" << folded_statistics_.unresolved
+        << ", branches=" << folded_statistics_.branch_count
+        << ", evaluated_hits=" << folded_statistics_.evaluated_hits
+        << ", max_estimated_relative_quadrature_error=" << folded_statistics_.largest_estimated_relative_error << '\n';
+}
+
+void PatchOptics::write_folded_metadata(std::ostream& out) const
+{
+    out << "# folded_patch_model=" << (result_used_folded_?"finite_branch_area_ratio_v1":"not_used")
+        << "\n# folded_patch_model_is_project_extension=true\n"
+        << "# folded_geometry=original_bilinear_chord_no_retracing_no_tessellation\n"
+        << "# folded_domains=connected_components_of_J_positive_or_negative\n"
+        << "# folded_density=parent_area_times_branch_parameter_area_divided_by_branch_unsigned_solid_angle\n"
+        << "# folded_phase_representative=branch_parameter_centroid_or_vertical_section_midpoint\n"
+        << "# folded_quadrature=adaptive_Gauss_8x8_vs_16x16_estimated_error_not_rigorous_bound\n"
+        << "# folded_quadrature_relative_tolerance=" << result_folded_config_.relative_tolerance
+        << "\n# folded_quadrature_max_panels=" << result_folded_config_.maximum_panels
+        << "\n# folded_quadrature_max_depth=" << result_folded_config_.maximum_depth
+        << "\n# folded_prepared_patches=" << folded_statistics_.prepared
+        << "\n# folded_unresolved_patches=" << folded_statistics_.unresolved
+        << "\n# folded_evaluated_hits=" << folded_statistics_.evaluated_hits
+        << "\n# legacy_partial_columns_include_resolved_folded_hits=true\n"
+        << "# query_refinement_flags_describe_geometry_not_optical_rejection=true\n";
 }
 
 void PatchOptics::run_diffraction()
@@ -204,7 +307,7 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
     out.imbue(std::locale::classic());
     out << std::setprecision(std::numeric_limits<double>::max_digits10)
         << "# format=rainbow_patch_optics_v1\n"
-        << "# quantity=regular_partial_model_angular_density_NOT_phase_function\n"
+        << "# quantity=model_partial_angular_density_NOT_phase_function\n"
         << "# optical_complete=false\n# source_coverage_certified=false\n"
         << "# focal_line_phase_applied=false\n# diffraction_applied=false\n# normalized=false\n"
         << "# input_states=one_coherent_Jones_state\n# phasor_convention=exp(+i*2*pi*q)\n"
@@ -213,7 +316,7 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
         << "# field_components=s_perpendicular,p_outgoing_cross_s\n"
         << "# density_units=input_field_squared*drop_unit_squared_per_sr\n"
         << "# physical_area_factor_mm2=" << double(config_.radius_mm) * config_.radius_mm << '\n'
-        << "# rejected_hit_policy=retain_regular_partial_sum_and_mark_incomplete\n"
+        << "# rejected_hit_policy=retain_evaluable_partial_sum_and_mark_incomplete\n"
         << "# numerical_error_policy=all_optical_values_nan\n"
         << "# partial_coherent_intensity_is_NOT_a_lower_bound=true\n"
         << "# missing_source_cells=" << statistics_.missing_source_cells
@@ -228,6 +331,7 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
         << "\n# incident_basis_x=" << config_.incident_basis_x.x << ',' << config_.incident_basis_x.y << ',' << config_.incident_basis_x.z
         << "\n# incident_field=" << config_.incident_field.x.real << ',' << config_.incident_field.x.imag << ','
         << config_.incident_field.y.real << ',' << config_.incident_field.y.imag << '\n';
+    write_folded_metadata(out);
     out << "# coefficients=";
     for(unsigned i = 0; i < 8; ++i) out << (i ? "," : "") << config_.shape.coefficients[i];
     out << '\n';
@@ -282,11 +386,11 @@ void PatchOptics::write_wave_csv(const std::filesystem::path& path) const
         << "# optical_effects_connected=true\n# optical_complete=false\n# source_coverage_certified=false\n"
         << "# normalized=false\n# focal_line_phase_applied=true\n# diffraction_stage_executed=true\n"
         << "# diffraction_applied_locally=true\n# diffraction_width_wavelength_scaling=none\n"
-        << "# phasor_convention=exp(+i*2*pi*q)\n# focal_rule=radial_cell_center_sign_plus_family_offsets\n"
+        << "# phasor_convention=exp(+i*2*pi*q)\n# focal_rule=regular_cell_center_or_fold_branch_representative_plus_family_offsets\n"
         << "# focal_absolute_family_offsets=explicit_project_convention_NOT_specified_in_paper\n"
         << "# focal_quarter_turn_offsets=";
     for(unsigned f=0;f<4;++f)out<<(f?",":"")<<wave_settings_.focal_quarter_turn_offsets[f];
-    out << "\n# focal_derivative=radial_derivative_of_bilinear_theta_at_emitting_cell_center\n"
+    out << "\n# focal_derivative=radial_derivative_of_original_bilinear_theta\n"
         << "# focal_invalid_policy=nan_no_complete_looking_partial_sum\n"
         << "# diffraction_model=project_local_spherical_gaussian_v1\n"
         << "# diffraction_not_author_code_identical=true\n"
@@ -316,7 +420,9 @@ void PatchOptics::write_wave_csv(const std::filesystem::path& path) const
         <<config_.incident_field.y.real<<','<<config_.incident_field.y.imag
         << "\n# coefficients=";
     for(unsigned f=0;f<8;++f)out<<(f?",":"")<<config_.shape.coefficients[f];
-    out << "\n# missing_source_cells="<<statistics_.missing_source_cells
+    out << '\n';
+    write_folded_metadata(out);
+    out << "# missing_source_cells="<<statistics_.missing_source_cells
         << "\n# no_outgoing_source_cells="<<statistics_.no_outgoing_source_cells
         << "\n# theta_count="<<grid_.theta_count<<"\n# phi_count="<<grid_.phi_count
         << "\n# order=theta_major_phi_minor\n# angle_units=radians\n"
@@ -366,6 +472,9 @@ bool PatchOptics::close_noexcept() noexcept
                                                "cuStreamSynchronize(optics cleanup)") && ok;
         has_pending_work_ = false;
     }
+    ok = folded_records_.close_noexcept() && ok;
+    ok = folded_written_.close_noexcept() && ok;
+    ok = folded_indices_.close_noexcept() && ok;
     ok = diffraction_results_.close_noexcept() && ok;
     ok = transitions_.close_noexcept() && ok;
     ok = focal_results_.close_noexcept() && ok;

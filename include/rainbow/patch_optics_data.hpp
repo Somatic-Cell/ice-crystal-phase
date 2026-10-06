@@ -42,8 +42,9 @@ struct OpticalField64
 
 struct PatchOpticalResult
 {
-    // Partial sum over evaluable regular hits ONLY.  A numeric error makes all
-    // these values NaN. Pending geometry leaves a labelled, finite partial sum.
+    // Historical field names retained for source/ABI compatibility. With the
+    // optional folded-patch view, these sums also include resolved branch hits.
+    // A numeric error makes all values NaN; unsupported hits remain explicit.
     OpticalField64 regular_partial_path_field{};
     double regular_partial_incoherent_s = 0.0;
     double regular_partial_incoherent_p = 0.0;
@@ -59,7 +60,10 @@ struct PatchOpticalResult
     std::uint32_t flags = PatchOpticalNone;
     std::uint32_t query_flags = 0;
     std::uint32_t first_problem_patch_id = 0xffffffffu;
+    // Formerly reserved ABI word. Tests that use it as an output guard still work.
     std::uint32_t reserved = 0;
+    [[nodiscard]] HOST_DEVICE std::uint32_t folded_evaluated_hits() const noexcept
+    { return reserved; }
 
     [[nodiscard]] HOST_DEVICE bool known_hits_complete() const noexcept
     {

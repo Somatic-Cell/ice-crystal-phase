@@ -2,6 +2,7 @@
 
 #include <rainbow/patch_optics_data.hpp>
 #include <rainbow/focal_phase.hpp>
+#include <rainbow/folded_patch_geometry.hpp>
 #include <rainbow/phase_interpolation.hpp>
 #include <rainbow/polarization_transport.hpp>
 #include <cmath>
@@ -25,8 +26,10 @@ struct PatchOpticalEvaluator
         const OutgoingVertex* vertices, const std::uint32_t vertex_count,
         const OutgoingPatch& patch, const PatchQueryHit& hit,
         const Vec3 direction, const TransverseFrame target_frame,
-        Contribution& output) noexcept
+        Contribution& output, const FoldedPatchRecord* folded = nullptr,
+        const FoldedBranch** used_branch = nullptr) noexcept
     {
+        if(used_branch) *used_branch = nullptr;
         if(!vertices || (hit.flags & ~(BilinearBoundary | BilinearSingular | BilinearUsedFp64)) != 0u
            || hit.patch_id != patch.patch_id || hit.root_index > 1u
            || !(hit.u >= 0.0f && hit.u <= 1.0f && hit.v >= 0.0f && hit.v <= 1.0f)
@@ -34,14 +37,28 @@ struct PatchOpticalEvaluator
             return PatchOpticalInvalidInput;
 
         std::uint32_t pending = 0;
-        if(patch.status == PatchCellStatus::NeedsRefinement) pending |= PatchOpticalRefinementPending;
+        const FoldedBranch* branch = nullptr;
+        if(patch.status == PatchCellStatus::NeedsRefinement)
+        {
+            if(!folded || folded->patch_id != patch.patch_id || folded->compact_index != hit.compact_index
+               || folded->flags != FoldedReady)
+                pending |= PatchOpticalRefinementPending;
+            else
+            {
+                const int b = FoldedPatchGeometry::branch_at(*folded, double(hit.u), double(hit.v));
+                if(b < 0) pending |= PatchOpticalSingularPending;
+                else branch = &folded->branches[b];
+            }
+        }
         else if(!patch.has_regular_spherical_map()) return PatchOpticalInvalidInput;
         if(hit.flags & BilinearBoundary) pending |= PatchOpticalBoundaryPending;
         if(hit.flags & BilinearSingular) pending |= PatchOpticalSingularPending;
         if(pending != 0u) return pending; // no epsilon-area or zero-field substitution
 
-        const double area = static_cast<double>(patch.incident_area_drop2);
-        const double omega = ::fabs(static_cast<double>(patch.signed_solid_angle_sr));
+        const double area = branch ? double(patch.incident_area_drop2) * branch->area_fraction
+                                   : static_cast<double>(patch.incident_area_drop2);
+        const double omega = branch ? branch->solid_angle_sr
+                                    : ::fabs(static_cast<double>(patch.signed_solid_angle_sr));
         if(!(area > 0.0 && finite(area) && omega > 0.0 && finite(omega)))
             return PatchOpticalInvalidInput;
 
@@ -98,13 +115,15 @@ struct PatchOpticalEvaluator
         if(!finite(candidate.incoherent_s) || !finite(candidate.incoherent_p)
            || !finite_field(candidate.path_field)) return PatchOpticalArithmeticFailure;
         output = candidate; // success-only update
+        if(used_branch) *used_branch = branch;
         return PatchOpticalNone;
     }
 
     [[nodiscard]] HOST_DEVICE static PatchOpticalResult evaluate_direction(
         const PatchOpticsParams& input, const std::uint32_t index,
         const FocalPhaseConfig* focal_config = nullptr,
-        FocalOpticalResult* focal_output = nullptr) noexcept
+        FocalOpticalResult* focal_output = nullptr,
+        const FoldedPatchView folded = {}) noexcept
     {
         PatchOpticalResult result{};
         // Companion output is invalid until the entire known-hit evaluation finishes.
@@ -138,7 +157,8 @@ struct PatchOpticalEvaluator
 
         // Pending flags in the summary are also preserved, even if supplied
         // externally without a corresponding record. Never certify such input.
-        if(summary.flags & PatchQueryRefinementHit) result.flags |= PatchOpticalRefinementPending;
+        if((summary.flags & PatchQueryRefinementHit) && !folded.enabled())
+            result.flags |= PatchOpticalRefinementPending;
         if(summary.flags & PatchQueryBoundaryHit) result.flags |= PatchOpticalBoundaryPending;
         if(summary.flags & PatchQuerySingularHit) result.flags |= PatchOpticalSingularPending;
         TransverseFrame target_frame{};
@@ -153,18 +173,26 @@ struct PatchOpticalEvaluator
         Sum focal_sr{}, focal_si{}, focal_pr{}, focal_pi{}, family_envelope[4]{};
         if(with_focal && !FocalPhase::layout_valid(*focal_config)) focal.flags |= FocalInvalidGeometry;
 
+        std::uint32_t recorded_nonregular_hits = 0;
         for(std::uint32_t i = 0; i < summary.hit_count; ++i)
         {
             const auto& hit = input.hits[begin + i];
             std::uint32_t flags = 0;
             Contribution contribution{};
+            const FoldedBranch* used_branch = nullptr;
             // The upstream query sorts and removes exact duplicate reports.
             // Reject a broken ordering/duplicate contract instead of summing twice.
             if(i != 0u && !strictly_before(input.hits[begin + i - 1u], hit))
                 flags = PatchOpticalInvalidInput;
             else if(hit.compact_index >= input.patch_count) flags = PatchOpticalInvalidInput;
-            else flags = evaluate_patch(input.vertices, input.vertex_count,
-                    input.patches[hit.compact_index], hit, input.directions[index], target_frame, contribution);
+            else
+            {
+                const auto& patch = input.patches[hit.compact_index];
+                recorded_nonregular_hits += patch.status == PatchCellStatus::NeedsRefinement;
+                flags = evaluate_patch(input.vertices, input.vertex_count, patch, hit,
+                    input.directions[index], target_frame, contribution,
+                    folded.find(hit.compact_index), &used_branch);
+            }
 
             if(flags != 0u)
             {
@@ -176,13 +204,28 @@ struct PatchOpticalEvaluator
                 continue;
             }
             ++result.evaluated_hits;
+            result.reserved += used_branch != nullptr; // ABI-retained folded-hit counter
             sr.add(contribution.path_field.s_real); si.add(contribution.path_field.s_imag);
             pr.add(contribution.path_field.p_real); pi.add(contribution.path_field.p_imag);
             incoherent_s.add(contribution.incoherent_s); incoherent_p.add(contribution.incoherent_p);
             if(with_focal)
             {
                 FocalPhaseEstimate estimate{};
-                const auto code = FocalPhase::estimate(input.vertices, input.vertex_count,
+                std::uint32_t code = FocalNone;
+                if(used_branch)
+                {
+                    code = used_branch->focal_flags;
+                    if(FocalPhase::layout_valid(*focal_config))
+                    {
+                        const auto cells = (focal_config->grid_width-1u)*(focal_config->grid_height-1u);
+                        estimate.family = hit.patch_id/cells;
+                        if(estimate.family >= 4) code |= FocalInvalidGeometry;
+                        estimate.quarter_turns = used_branch->quarter_turns;
+                        estimate.extra_quarter_turn = used_branch->extra_quarter_turn;
+                    }
+                    else code |= FocalInvalidGeometry;
+                }
+                else code = FocalPhase::estimate(input.vertices, input.vertex_count,
                     input.patches[hit.compact_index], input.incident_direction, *focal_config, estimate);
                 if(code != FocalNone)
                 {
@@ -201,6 +244,13 @@ struct PatchOpticalEvaluator
                 }
             }
 
+        }
+        // Defer ONLY refinement that is accounted for by actual records.
+        // Boundary/singular/query-error flags are never cleared by this feature.
+        if(folded.enabled() && (summary.flags & PatchQueryRefinementHit))
+        {
+            if(recorded_nonregular_hits == 0u) result.flags |= PatchOpticalRefinementPending;
+            if(recorded_nonregular_hits != summary.refinement_hits) result.flags |= PatchOpticalInvalidInput;
         }
         result.regular_partial_path_field = {sr.value(), si.value(), pr.value(), pi.value()};
         result.regular_partial_incoherent_s = incoherent_s.value();

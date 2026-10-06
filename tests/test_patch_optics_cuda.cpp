@@ -108,7 +108,13 @@ int run(const std::filesystem::path& optics_module, const std::filesystem::path&
         Vec3{.11f,.05f,1}.normalized(),Vec3{-.1f,.03f,1}.normalized()};
     query.query(accel,directions);
     tests::require_optics(query.statistics().error_directions==0u,"Query fixture failed before optics.");
-    PatchOptics optics(cuda);optics.load_module(optics_module);optics.evaluate(accel,query,config);
+    PatchOptics optics(cuda);
+    optics.load_module(optics_module);
+
+    // この旧仕様の比較テストだけを，従来の評価モードに固定する．
+    optics.enable_folded_patches(false);
+
+    optics.evaluate(accel, query, config);
     tests::require_optics(optics.statistics().error_directions==0u,"Integration optical numerical error.");
     tests::require_optics(optics.statistics().pending_directions!=0u,"Folded/boundary hits were silently treated as complete.");
     std::vector<OutgoingPatch> host_patches(accel.patches().element_count());

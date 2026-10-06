@@ -1,0 +1,1245 @@
+{
+  "format": "rainbow_patch_failure_witness_v1",
+  "origin": "synthetic_test",
+  "integration_baseline_commit": "8c8deabef6fb10717308491b1e992a266b46e3d0",
+  "changes_numerical_results": false,
+  "float_encoding": "IEEE754_binary32_bits_as_uint32",
+  "scope": "all_recorded_hits_of_failed_directions_plus_named_first_problem_patches",
+  "limits": "No source coverage certificate; query failures without hits expose only recorded first_problem IDs; host replay is not a GPU predicate trace.",
+  "config": {
+    "grid_width": 4097,
+    "grid_height": 2,
+    "theta_count": 2,
+    "phi_count": 2,
+    "radius_bits": 1065353216,
+    "wavelength_bits": 1143930880,
+    "ior_bits": [
+      1065353216,
+      1068133201
+    ],
+    "half_extent_bits": 1065437102,
+    "reference_distance_bits": [
+      1073741824,
+      1073741824
+    ],
+    "incident_direction_bits": [
+      1065353216,
+      0,
+      0
+    ],
+    "incident_basis_x_bits": [
+      0,
+      0,
+      1065353216
+    ],
+    "incident_field_bits": [
+      1065353216,
+      0,
+      0,
+      0
+    ],
+    "shape_coefficients_bits": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "focal_offsets": [
+      0,
+      0,
+      0,
+      0
+    ]
+  },
+  "summary": {
+    "total_directions": 4,
+    "selected_directions": 1,
+    "selected_patches": 5,
+    "stored_patch_count": 5,
+    "missing_source_cells": 0,
+    "no_outgoing_source_cells": 0,
+    "query_error_directions": 0,
+    "optical_incomplete_directions": 1,
+    "focal_unavailable_directions": 1,
+    "diffraction_unavailable_directions": 1,
+    "nonfinite_directions": 1,
+    "underresolved_directions": 0,
+    "gpu_read_bytes": 0,
+    "gpu_read_calls": 0
+  },
+  "patches": [
+    {
+      "compact_index": 0,
+      "patch_id": 0,
+      "family": 0,
+      "cell_x": 0,
+      "cell_y": 0,
+      "stored_status": 1,
+      "area_bits": 981635747,
+      "stored_omega_bits": 1033887494,
+      "cell_center": [
+        -1.0097534084343351,
+        0
+      ],
+      "vertices": [
+        {
+          "vertex_index": 0,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 1,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            1045220557,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4097,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4098,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            1045220557,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        }
+      ],
+      "host_audit": {
+        "finite_input": true,
+        "orientation32": 1,
+        "interval_orientation64": 1,
+        "hemisphere_axis_bits": [
+          0,
+          0,
+          1082130432
+        ],
+        "jacobian32": [
+          [
+            0.07999996095895767,
+            0.08000004291534424
+          ],
+          [
+            0.07999996095895767,
+            0.08000004291534424
+          ],
+          [
+            0.07999996095895767,
+            0.08000004291534424
+          ],
+          [
+            0.07999996095895767,
+            0.08000004291534424
+          ]
+        ],
+        "jacobian64": [
+          [
+            0.08000000238418573,
+            0.08000000238418589
+          ],
+          [
+            0.08000000238418573,
+            0.08000000238418589
+          ],
+          [
+            0.08000000238418573,
+            0.08000000238418589
+          ],
+          [
+            0.08000000238418573,
+            0.08000000238418589
+          ]
+        ],
+        "hemisphere32": [
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ]
+        ],
+        "hemisphere64": [
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ]
+        ],
+        "jacobian_value64": [
+          0.08000000238418581,
+          0.08000000238418581,
+          0.08000000238418581,
+          0.08000000238418581
+        ],
+        "signed_omega32_bits": 1033887494,
+        "signed_omega64": 0.0780620964662627
+      }
+    },
+    {
+      "compact_index": 1,
+      "patch_id": 2,
+      "family": 0,
+      "cell_x": 2,
+      "cell_y": 0,
+      "stored_status": 3,
+      "area_bits": 981635747,
+      "stored_omega_bits": 2143289344,
+      "cell_center": [
+        -1.0087670803186484,
+        0
+      ],
+      "vertices": [
+        {
+          "vertex_index": 2,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 3,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            1045220557,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4099,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            1045220557,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4100,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        }
+      ],
+      "host_audit": {
+        "finite_input": true,
+        "orientation32": 0,
+        "interval_orientation64": 0,
+        "hemisphere_axis_bits": [
+          0,
+          0,
+          1082130432
+        ],
+        "jacobian32": [
+          [
+            0.07999996095895767,
+            0.08000004291534424
+          ],
+          [
+            0.07999996095895767,
+            0.08000004291534424
+          ],
+          [
+            -0.08000004291534424,
+            -0.07999996095895767
+          ],
+          [
+            -0.08000004291534424,
+            -0.07999996095895767
+          ]
+        ],
+        "jacobian64": [
+          [
+            0.08000000238418573,
+            0.08000000238418589
+          ],
+          [
+            0.08000000238418573,
+            0.08000000238418589
+          ],
+          [
+            -0.08000000238418589,
+            -0.08000000238418573
+          ],
+          [
+            -0.08000000238418589,
+            -0.08000000238418573
+          ]
+        ],
+        "hemisphere32": [
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ]
+        ],
+        "hemisphere64": [
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ]
+        ],
+        "jacobian_value64": [
+          0.08000000238418581,
+          0.08000000238418581,
+          -0.08000000238418581,
+          -0.08000000238418581
+        ],
+        "signed_omega32_bits": 0,
+        "signed_omega64": 0
+      }
+    },
+    {
+      "compact_index": 2,
+      "patch_id": 4,
+      "family": 0,
+      "cell_x": 4,
+      "cell_y": 0,
+      "stored_status": 3,
+      "area_bits": 981635747,
+      "stored_omega_bits": 2143289344,
+      "cell_center": [
+        -1.0077807522029616,
+        0
+      ],
+      "vertices": [
+        {
+          "vertex_index": 4,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 5,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4101,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4102,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        }
+      ],
+      "host_audit": {
+        "finite_input": true,
+        "orientation32": 0,
+        "interval_orientation64": 0,
+        "hemisphere_axis_bits": [
+          3209481421,
+          0,
+          1082130432
+        ],
+        "jacobian32": [
+          [
+            -1.2611686178923354e-44,
+            1.2611686178923354e-44
+          ],
+          [
+            -1.2611686178923354e-44,
+            1.2611686178923354e-44
+          ],
+          [
+            -1.2611686178923354e-44,
+            1.2611686178923354e-44
+          ],
+          [
+            -1.2611686178923354e-44,
+            1.2611686178923354e-44
+          ]
+        ],
+        "jacobian64": [
+          [
+            -4.4e-323,
+            4.4e-323
+          ],
+          [
+            -4.4e-323,
+            4.4e-323
+          ],
+          [
+            -4.4e-323,
+            4.4e-323
+          ],
+          [
+            -4.4e-323,
+            4.4e-323
+          ]
+        ],
+        "hemisphere32": [
+          [
+            4.159999370574951,
+            4.160000801086426
+          ],
+          [
+            4.159999370574951,
+            4.160000801086426
+          ],
+          [
+            4.159999370574951,
+            4.160000801086426
+          ],
+          [
+            4.159999370574951,
+            4.160000801086426
+          ]
+        ],
+        "hemisphere64": [
+          [
+            4.16000000476837,
+            4.160000004768373
+          ],
+          [
+            4.16000000476837,
+            4.160000004768373
+          ],
+          [
+            4.16000000476837,
+            4.160000004768373
+          ],
+          [
+            4.16000000476837,
+            4.160000004768373
+          ]
+        ],
+        "jacobian_value64": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "signed_omega32_bits": 0,
+        "signed_omega64": 0
+      }
+    },
+    {
+      "compact_index": 3,
+      "patch_id": 6,
+      "family": 0,
+      "cell_x": 6,
+      "cell_y": 0,
+      "stored_status": 2,
+      "area_bits": 981635747,
+      "stored_omega_bits": 3181371142,
+      "cell_center": [
+        -1.0067944240872748,
+        0
+      ],
+      "vertices": [
+        {
+          "vertex_index": 6,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 7,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            3192704205,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4103,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            1045220557,
+            3184315597,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4104,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            1045220557,
+            1036831949,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        }
+      ],
+      "host_audit": {
+        "finite_input": true,
+        "orientation32": -1,
+        "interval_orientation64": -1,
+        "hemisphere_axis_bits": [
+          0,
+          0,
+          1082130432
+        ],
+        "jacobian32": [
+          [
+            -0.08000004291534424,
+            -0.07999996095895767
+          ],
+          [
+            -0.08000004291534424,
+            -0.07999996095895767
+          ],
+          [
+            -0.08000004291534424,
+            -0.07999996095895767
+          ],
+          [
+            -0.08000004291534424,
+            -0.07999996095895767
+          ]
+        ],
+        "jacobian64": [
+          [
+            -0.08000000238418589,
+            -0.08000000238418573
+          ],
+          [
+            -0.08000000238418589,
+            -0.08000000238418573
+          ],
+          [
+            -0.08000000238418589,
+            -0.08000000238418573
+          ],
+          [
+            -0.08000000238418589,
+            -0.08000000238418573
+          ]
+        ],
+        "hemisphere32": [
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            3.999999523162842,
+            4.000000953674316
+          ]
+        ],
+        "hemisphere64": [
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            3.999999999999999,
+            4.000000000000002
+          ]
+        ],
+        "jacobian_value64": [
+          -0.08000000238418581,
+          -0.08000000238418581,
+          -0.08000000238418581,
+          -0.08000000238418581
+        ],
+        "signed_omega32_bits": 3181371142,
+        "signed_omega64": -0.0780620964662627
+      }
+    },
+    {
+      "compact_index": 4,
+      "patch_id": 8,
+      "family": 0,
+      "cell_x": 8,
+      "cell_y": 0,
+      "stored_status": 3,
+      "area_bits": 981635747,
+      "stored_omega_bits": 2143289344,
+      "cell_center": [
+        -1.005808095971588,
+        0
+      ],
+      "vertices": [
+        {
+          "vertex_index": 8,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            0,
+            0,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 9,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            981467136,
+            981467136,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4105,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            981467136,
+            981467138,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        },
+        {
+          "vertex_index": 4106,
+          "position_bits": [
+            0,
+            0,
+            0
+          ],
+          "direction_bits": [
+            989855744,
+            989855745,
+            1065353216
+          ],
+          "basis_x_bits": [
+            1065353216,
+            0,
+            0
+          ],
+          "field_bits": [
+            1065353216,
+            0,
+            0,
+            0
+          ],
+          "turns": 123,
+          "fraction_bits": 1048576000,
+          "status": 1,
+          "diagnostics": 0
+        }
+      ],
+      "host_audit": {
+        "finite_input": true,
+        "orientation32": 0,
+        "interval_orientation64": 1,
+        "hemisphere_axis_bits": [
+          998244352,
+          998244353,
+          1082130432
+        ],
+        "jacobian32": [
+          [
+            -3.9790401334081904e-13,
+            7.389646078208301e-13
+          ],
+          [
+            -3.9790401334081904e-13,
+            7.389646078208301e-13
+          ],
+          [
+            -3.9790401334081904e-13,
+            7.389646078208301e-13
+          ],
+          [
+            -3.9790401334081904e-13,
+            7.389646078208301e-13
+          ]
+        ],
+        "jacobian64": [
+          [
+            2.2737367417268256e-13,
+            2.273736763961443e-13
+          ],
+          [
+            2.2737367417268256e-13,
+            2.273736763961443e-13
+          ],
+          [
+            2.2737367417268256e-13,
+            2.273736763961443e-13
+          ],
+          [
+            2.2737367417268256e-13,
+            2.273736763961443e-13
+          ]
+        ],
+        "hemisphere32": [
+          [
+            3.999999523162842,
+            4.000000953674316
+          ],
+          [
+            4.000006675720215,
+            4.000008583068848
+          ],
+          [
+            4.000007152557373,
+            4.000008583068848
+          ],
+          [
+            4.000014305114746,
+            4.000016212463379
+          ]
+        ],
+        "hemisphere64": [
+          [
+            3.999999999999999,
+            4.000000000000002
+          ],
+          [
+            4.000007629394984,
+            4.000007629394988
+          ],
+          [
+            4.000007629395895,
+            4.000007629395897
+          ],
+          [
+            4.000015258790881,
+            4.000015258790883
+          ]
+        ],
+        "jacobian_value64": [
+          2.2737367544323206e-13,
+          2.2737367544323206e-13,
+          2.2737367544323206e-13,
+          2.2737367544323206e-13
+        ],
+        "signed_omega32_bits": 713031624,
+        "signed_omega64": 2.2737291650482617e-13
+      }
+    }
+  ],
+  "directions": [
+    {
+      "direction_id": 0,
+      "theta_rad": 0.7853981633974483,
+      "phi_rad": -1.5707963267948966,
+      "direction_bits": [
+        0,
+        0,
+        1065353216
+      ],
+      "query_flags": 8,
+      "query_first_problem": 4294967295,
+      "candidate_count": 1,
+      "hit_count": 1,
+      "optical_flags": 32,
+      "optical_first_problem": 2,
+      "evaluated_hits": 0,
+      "rejected_hits": 1,
+      "focal_flags": 2,
+      "focal_first_problem": 2,
+      "focal_corrected_hits": 0,
+      "focal_extra_quarter_turn_hits": 0,
+      "family_hits": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "diffraction_flags": 4,
+      "diffraction_transition_kind": 0,
+      "diffraction_sigma_rad": 0,
+      "diffraction_blend": 0,
+      "incoherent": [
+        0,
+        0
+      ],
+      "path_field": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "path_intensity": [
+        0,
+        0
+      ],
+      "focal_field": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "focal_intensity": [
+        null,
+        null
+      ],
+      "diffraction_intensity": [
+        null,
+        null
+      ],
+      "hits": [
+        {
+          "compact_index": 1,
+          "patch_id": 2,
+          "root_index": 0,
+          "flags": 0,
+          "uvtr_bits": [
+            1048576000,
+            1061158912,
+            1065353216,
+            0
+          ],
+          "jacobian_at_hit64": -0.040000001192092904
+        }
+      ]
+    }
+  ],
+  "absent_problem_patch_ids": [],
+  "report_complete": true
+}

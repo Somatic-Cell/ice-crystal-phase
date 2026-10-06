@@ -4,10 +4,12 @@
 #include <rainbow/device_buffer.hpp>
 #include <rainbow/patch_optics_data.hpp>
 #include <rainbow/wave_optics_data.hpp>
+#include <rainbow/folded_patch_data.hpp>
 #include <rainbow/query_direction_grid.hpp>
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <iosfwd>
 #include <vector>
 
 namespace rainbow
@@ -41,6 +43,11 @@ public:
     PatchOptics& operator=(PatchOptics&&) = delete;
 
     void load_module(const std::filesystem::path& fatbin_path);
+    // Applies to the NEXT evaluate call; legacy comparison can disable the
+    // extension without modifying geometry or the original query buffers.
+    void enable_folded_patches(bool enabled) noexcept { folded_enabled_ = enabled; }
+    void set_folded_patch_config(const FoldedPatchConfig& config);
+    [[nodiscard]] const FoldedPatchStatistics& folded_statistics() const noexcept { return folded_statistics_; }
     void evaluate(const PatchAccel& source, const PatchQuery& query,
                   const RaindropTraceConfig& config);
     // Explicit new mode; the original evaluate()/write_csv() semantics remain.
@@ -63,6 +70,9 @@ private:
     void synchronize();
     void evaluate_impl(const PatchAccel&, const PatchQuery&, const RaindropTraceConfig&, const WaveOpticsSettings*);
     void run_diffraction();
+    FoldedPatchView prepare_folded(const PatchAccel&, const FocalPhaseConfig&, bool with_focal);
+    void collect_folded_statistics(bool with_focal);
+    void write_folded_metadata(std::ostream&) const;
     const CudaContext& cuda_context_;
     CudaModule module_;
     CUfunction function_ = nullptr;
@@ -70,6 +80,11 @@ private:
     DeviceBuffer<FocalOpticalResult> focal_results_;
     DeviceBuffer<RainbowTransition> transitions_;
     DeviceBuffer<DiffractionResult> diffraction_results_;
+    DeviceBuffer<std::uint32_t> folded_indices_, folded_written_;
+    DeviceBuffer<FoldedPatchRecord> folded_records_;
+    FoldedPatchConfig folded_config_{}, result_folded_config_{};
+    FoldedPatchStatistics folded_statistics_{};
+    bool folded_enabled_ = true, result_used_folded_ = false;
     std::vector<FocalOpticalResult> host_focal_;
     std::vector<RainbowTransition> host_transitions_;
     std::vector<DiffractionResult> host_diffraction_;

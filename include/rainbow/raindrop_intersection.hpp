@@ -261,6 +261,24 @@ template<class T> HOST_DEVICE SurfaceRoot<T> solve_surface(
             T lo=s.lo,hi=s.hi;
             T f_lo=shape.implicit_value(o.at(w,lo));
             T f_hi=shape.implicit_value(o.at(w,hi));
+            // 単調性が確認できていて，両端が同じ符号なら，
+            // その符号を区間演算で確認してから根なしと判定する．
+            // 通常の浮動小数点評価の符号だけでは区間を除外しない
+            if((f_lo < T(0)) == (f_hi < T(0)))
+            {
+                const auto left =
+                    bound_surface(shape, o, w, lo, lo).value;
+                const auto right =
+                    bound_surface(shape, o, w, hi, hi).value;
+
+                const bool both_positive =
+                    left.lo > T(0) && right.lo > T(0);
+                const bool both_negative =
+                    left.hi < T(0) && right.hi < T(0);
+
+                if(both_positive || both_negative)
+                    continue;
+            }
             if(f_lo==T(0) && lo>start) return {BoundaryCode::Hit,lo};
             if(f_hi==T(0) && hi>start) return {BoundaryCode::Hit,hi};
             if((f_lo<T(0))!=(f_hi<T(0)))

@@ -2,6 +2,7 @@
 #include <rainbow/patch_accel.hpp>
 #include <rainbow/patch_query.hpp>
 #include <rainbow/patch_optics.hpp>
+#include <rainbow/patch_failure_report.hpp>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +25,7 @@ struct TraceCommandLine
     std::filesystem::path query_module_path,query_csv_path,query_hits_csv_path;
     std::filesystem::path optics_module_path,optics_csv_path;
     std::filesystem::path wave_csv_path;
+    std::filesystem::path patch_failure_report_path;
     rainbow::WaveOpticsSettings wave_settings{};
     bool focal_offsets_given=false, diffraction_option_given=false;
     std::uint32_t query_theta=90,query_phi=180;
@@ -40,7 +42,8 @@ struct TraceCommandLine
             "[--query-hits-csv hits.csv] [--query-theta N --query-phi N] "
             "[--optics-module patch_optics.fatbin --optics-csv optics.csv] "
             "[--wave-csv wave.csv --focal-offsets R,TT,TRT,TRRT] "
-            "[--diffraction-sigma-deg value] [--diffraction-contrast value]");
+            "[--diffraction-sigma-deg value] [--diffraction-contrast value] "
+            "[--patch-failure-report NEW_report.json]");
         TraceCommandLine command;
         command.module_path=std::filesystem::path(argv[1]);
         command.output_path=std::filesystem::path(argv[2]);
@@ -77,6 +80,8 @@ struct TraceCommandLine
             {command.optics_module_path=std::filesystem::path(argv[i]);continue;}
             if(option=="--optics-csv")
             {command.optics_csv_path=std::filesystem::path(argv[i]);continue;}
+            if(option=="--patch-failure-report")
+            {command.patch_failure_report_path=std::filesystem::path(argv[i]);continue;}
             if(option=="--wave-csv")
             {command.wave_csv_path=std::filesystem::path(argv[i]);continue;}
             const std::string value=ascii(argv[i]);
@@ -159,8 +164,16 @@ struct TraceCommandLine
             throw std::invalid_argument("--wave-csv requires optical evaluation and explicit --focal-offsets R,TT,TRT,TRRT.");
         if(!wants_wave && (command.focal_offsets_given || command.diffraction_option_given))
             throw std::invalid_argument("Focal/diffraction options require --wave-csv.");
-        const std::array<std::filesystem::path,6> outputs={command.output_path,command.patch_csv_path,
-            command.query_csv_path,command.query_hits_csv_path,command.optics_csv_path,command.wave_csv_path};
+        if(!command.patch_failure_report_path.empty() && !wants_wave)
+            throw std::invalid_argument("--patch-failure-report requires --wave-csv.");
+        if(!command.patch_failure_report_path.empty())
+        {
+            auto partial=command.patch_failure_report_path;partial+=".part";
+            if(std::filesystem::exists(command.patch_failure_report_path)||std::filesystem::exists(partial))
+                throw std::invalid_argument("Choose a new --patch-failure-report path (report or .part already exists).");
+        }
+        const std::array<std::filesystem::path,7> outputs={command.output_path,command.patch_csv_path,
+            command.query_csv_path,command.query_hits_csv_path,command.optics_csv_path,command.wave_csv_path,command.patch_failure_report_path};
         for(std::size_t a=0;a<outputs.size();++a)for(std::size_t b=a+1;b<outputs.size();++b)
         {
             if(outputs[a].empty() || outputs[b].empty())continue;
@@ -271,6 +284,18 @@ template<class Char> int run(const int argc,Char* argv[])
                     optics.load_module(command.optics_module_path);
                     if(command.wave_csv_path.empty()) optics.evaluate(patches,query,tracer.config());
                     else optics.evaluate_wave(patches,query,tracer.config(),command.wave_settings);
+                    // Read-only capture BEFORE final CSV I/O and before owners close.
+                    // The report does not alter any numerical output or error mask.
+                    if(!command.patch_failure_report_path.empty())
+                    {
+                        const auto report=rainbow::PatchFailureReport::capture(
+                            cuda_context,patches,query,optics,tracer.config(),command.wave_settings);
+                        report.write_json(command.patch_failure_report_path);
+                        std::cout<<"Patch failure report: directions="<<report.snapshot().directions.size()
+                            <<", patches="<<report.snapshot().patches.size()
+                            <<", sparse_read_bytes="<<report.snapshot().gpu_read_bytes<<'\n';
+                        std::cout<<"Saved "<<command.patch_failure_report_path<<" (read-only witnesses, NOT repaired values).\n";
+                    }
                     optics.write_csv(command.optics_csv_path);
                     bool wave_failed=false;
                     if(!command.wave_csv_path.empty())
