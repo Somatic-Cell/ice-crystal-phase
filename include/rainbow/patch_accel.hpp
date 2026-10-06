@@ -12,6 +12,7 @@
 
 namespace rainbow
 {
+class RaindropTracer;
 
 struct PatchBuildStatistics
 {
@@ -26,7 +27,8 @@ struct PatchBuildStatistics
 
 // Owns the constructed patch records, persistent cell-status map, AABBs and GAS.
 // Does NOT own vertices, CudaContext, or OptixContext. All three must outlive
-// this object; vertices must remain unchanged until the consumer finishes.
+// this object; vertices and the optional second-column buffer must remain
+// unchanged and alive until all downstream consumers finish.
 // The vertex buffer and both contexts must belong to the same CUDA context.
 //
 // This is geometric construction, NOT an optical query. Incomplete and folded
@@ -46,7 +48,13 @@ public:
     // Blocking boundary: prior work on cuda_context.stream() is completed;
     // classification, stable compaction and GAS build finish before return.
     // Users of a previous GAS on OTHER streams must already be finished.
-    void build(const DeviceBuffer<OutgoingVertex>& vertices,const RaindropTraceConfig& config);
+    void build(const DeviceBuffer<OutgoingVertex>& vertices,const RaindropTraceConfig& config,
+               const DeviceBuffer<Field32>* second_input_fields = nullptr);
+    // Preferred production entry: carries both response columns without asking
+    // the caller to separately label or forward the second-column view.
+    void build(const RaindropTracer& tracer);
+    [[nodiscard]] bool is_unpolarized() const noexcept { return source_second_fields_ != 0; }
+    [[nodiscard]] CUdeviceptr source_second_fields_address() const noexcept { return source_second_fields_; }
 
     [[nodiscard]] OptixTraversableHandle handle() const noexcept {return traversable_;}
     [[nodiscard]] bool has_result() const noexcept {return has_result_;}
@@ -85,7 +93,7 @@ private:
     PatchBuildLayout layout_{};
     PatchBuildStatistics statistics_{};
     OptixTraversableHandle traversable_=0;
-    CUdeviceptr source_vertices_=0;
+    CUdeviceptr source_vertices_=0,source_second_fields_=0;
     bool has_pending_work_=false;
     bool has_result_=false;
     bool is_closed_=false;

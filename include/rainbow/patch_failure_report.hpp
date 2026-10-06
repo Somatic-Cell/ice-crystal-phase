@@ -15,7 +15,7 @@ class PatchAccel;
 class PatchQuery;
 class PatchOptics;
 
-// Host-owned witness records. No device ABI is added or modified.
+// Host-owned witness records, not kernel launch structures.
 struct FailedDirectionWitness
 {
     std::uint32_t direction_id=0;
@@ -31,11 +31,13 @@ struct FailedPatchWitness
     std::uint32_t compact_index=0;
     OutgoingPatch patch{}; // original GPU classification is authoritative
     std::array<OutgoingVertex,4> vertices{};
+    std::array<Field32,4> second_input_fields{};
 };
 enum class PatchWitnessOrigin { SyntheticTest, GpuCapture, CpuRetrace };
 struct PatchFailureSnapshot
 {
     PatchWitnessOrigin origin = PatchWitnessOrigin::SyntheticTest;
+    IncidentPolarization input_polarization = IncidentPolarization::SingleJones;
     RaindropTraceConfig config{};
     WaveOpticsSettings wave_settings{};
     std::uint32_t theta_count=0,phi_count=0,stored_patch_count=0;

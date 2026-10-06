@@ -41,7 +41,8 @@ RaindropTracer::RaindropTracer(const CudaContext& cuda_context)
     :cuda_context_(cuda_context),optix_context_(cuda_context),
      raygen_record_(cuda_context),miss_record_(cuda_context),hit_record_(cuda_context),
      aabb_(cuda_context),gas_scratch_(cuda_context),gas_output_(cuda_context),
-     device_params_(cuda_context),device_config_(cuda_context),vertices_(cuda_context)
+     device_params_(cuda_context),device_config_(cuda_context),vertices_(cuda_context),
+     second_input_fields_(cuda_context)
 {}
 RaindropTracer::~RaindropTracer() noexcept {static_cast<void>(close_noexcept());}
 void RaindropTracer::synchronize()
@@ -73,7 +74,7 @@ void RaindropTracer::create_pipeline(const std::filesystem::path& optixir_path)
     OptixProgramGroupOptions go{};
     OptixProgramGroupDesc desc{};
     desc.kind=OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
-    desc.raygen.module=module_;desc.raygen.entryFunctionName="__raygen__raindrop_trace";
+    desc.raygen.module=module_;desc.raygen.entryFunctionName="__raygen__raindrop_trace_v2";
     log.reset();result=optixProgramGroupCreate(optix_context_.handle(),&desc,1,&go,log.data(),log.size_address(),&raygen_);
     log.check(result,"optixProgramGroupCreate(raygen)");
     desc={};desc.kind=OPTIX_PROGRAM_GROUP_KIND_MISS;
@@ -138,15 +139,27 @@ void RaindropTracer::build_drop_gas()
     params_.traversable=static_cast<std::uint64_t>(handle);
     // build と launch は同じ stream．ここに追加の同期は不要．
 }
-void RaindropTracer::trace(const RaindropSettings& settings)
+void RaindropTracer::trace(const RaindropSettings& settings) { trace_impl(settings, false); }
+void RaindropTracer::trace_unpolarized(const RaindropSettings& settings) { trace_impl(settings, true); }
+void RaindropTracer::trace_impl(const RaindropSettings& settings, const bool unpolarized)
 {
     if(is_closed_||!pipeline_) throw std::logic_error("Call create_pipeline before trace.");
     cuda_context_.make_current();
     if(has_pending_work_) synchronize();
     has_result_=false;
-    config_=settings.make_config();
+    auto effective_settings = settings;
+    if(unpolarized) effective_settings.incident_field = {{1,0},{0,0}}; // unit column-0 descriptor only
+    config_=effective_settings.make_config();
+    unpolarized_=unpolarized;
     const std::size_t total=std::size_t(config_.vertex_count())*4;
     if(vertices_.element_count()!=total){vertices_.close();vertices_.allocate(total);}
+    if(unpolarized_)
+    {
+        if(second_input_fields_.element_count()!=total)
+        { second_input_fields_.close(); second_input_fields_.allocate(total); }
+    }
+    else second_input_fields_.close();
+    params_.second_input_fields=unpolarized_ ? second_input_fields_.data() : nullptr;
     params_.vertices=vertices_.data();
     params_.config=device_config_.data();
     build_drop_gas();
@@ -169,6 +182,13 @@ std::vector<OutgoingVertex> RaindropTracer::download_vertices() const
     vertices_.download(std::span<OutgoingVertex>{output});
     return output;
 }
+std::vector<Field32> RaindropTracer::download_second_input_fields() const
+{
+    if(!has_result_ || !unpolarized_) throw std::logic_error("No completed two-input trace.");
+    std::vector<Field32> output(second_input_fields_.element_count());
+    second_input_fields_.download(std::span<Field32>{output});
+    return output;
+}
 void RaindropTracer::write_csv(const std::filesystem::path& output_path) const
 {
     const auto output=download_vertices();
@@ -179,21 +199,31 @@ void RaindropTracer::write_csv(const std::filesystem::path& output_path,
 {
     if(!has_result_ || output.size()!=vertices_.element_count())
         throw std::invalid_argument("CSV data must match the completed trace.");
+    const auto second = unpolarized_ ? download_second_input_fields() : std::vector<Field32>{};
     std::ofstream file(output_path);
     if(!file) throw std::runtime_error("Cannot open outgoing vertex CSV.");
     file<<std::setprecision(std::numeric_limits<float>::max_digits10);
     const auto& c=config_;
-    file<<"# format=rainbow_outgoing_vertices_v1\n# radius_mm="<<c.radius_mm<<"\n# wavelength_nm="<<c.wavelength_nm
+    file<<"# format="<<(unpolarized_?"rainbow_outgoing_vertices_v2":"rainbow_outgoing_vertices_v1")<<"\n# radius_mm="<<c.radius_mm<<"\n# wavelength_nm="<<c.wavelength_nm
         <<"\n# interior_index="<<c.interior_index<<"\n# exterior_index="<<c.exterior_index
         <<"\n# grid="<<c.grid_width<<","<<c.grid_height<<"\n# grid_half_extent_drop="<<c.grid_half_extent
         <<"\n# reference_distances_drop="<<c.reference_distance<<","<<c.outgoing_reference_distance
         <<"\n# incident_direction="<<c.incident_direction.x<<","<<c.incident_direction.y<<","<<c.incident_direction.z
-        <<"\n# incident_basis_x="<<c.incident_basis_x.x<<","<<c.incident_basis_x.y<<","<<c.incident_basis_x.z
-        <<"\n# incident_field="<<c.incident_field.x.real<<","<<c.incident_field.x.imag<<","<<c.incident_field.y.real<<","<<c.incident_field.y.imag
-        <<"\n# coefficients=";
+        <<"\n# incident_basis_x="<<c.incident_basis_x.x<<","<<c.incident_basis_x.y<<","<<c.incident_basis_x.z;
+    if(unpolarized_)
+        file << "\n# input_states=unpolarized_two_orthogonal_unit_Jones_inputs"
+             << "\n# incident_polarization=unpolarized\n# incident_total_intensity=1"
+             << "\n# input_coherency=0.5,0,0,0.5"
+             << "\n# response_column_0_input=1,0,0,0\n# response_column_1_input=0,0,1,0"
+             << "\n# field_columns=two_unit_input_responses_NOT_one_unpolarized_field";
+    else file << "\n# incident_field="<<c.incident_field.x.real<<","<<c.incident_field.x.imag
+              <<","<<c.incident_field.y.real<<","<<c.incident_field.y.imag;
+    file << "\n# coefficients=";
     for(unsigned k=0;k<8;++k) file<<(k?",":"")<<c.shape.coefficients[k];
     file<<"\n# coordinates: +y up; polar theta from -y; position normalized by radius.\n# field excludes propagation/focal/patch-area factors.\n"
-        <<"family,grid_index,ix,iy,status,diagnostics,px_drop,py_drop,pz_drop,wx,wy,wz,bx,by,bz,Ex_real,Ex_imag,Ey_real,Ey_imag,turns,fraction\n";
+        <<"family,grid_index,ix,iy,status,diagnostics,px_drop,py_drop,pz_drop,wx,wy,wz,bx,by,bz,";
+    if(unpolarized_) file<<"J00_real,J00_imag,J10_real,J10_imag,turns,fraction,J01_real,J01_imag,J11_real,J11_imag\n";
+    else file<<"Ex_real,Ex_imag,Ey_real,Ey_imag,turns,fraction\n";
     constexpr const char* families[]={"R","TT","TRT","TRRT"};
     for(unsigned p=0;p<4;++p) for(std::uint32_t i=0;i<c.vertex_count();++i)
     {
@@ -203,7 +233,13 @@ void RaindropTracer::write_csv(const std::filesystem::path& output_path,
             <<v.direction_drop.x<<','<<v.direction_drop.y<<','<<v.direction_drop.z<<','
             <<v.basis_x.x<<','<<v.basis_x.y<<','<<v.basis_x.z<<','
             <<v.field.x.real<<','<<v.field.x.imag<<','<<v.field.y.real<<','<<v.field.y.imag<<','
-            <<v.optical_cycles.turns<<','<<v.optical_cycles.fraction<<'\n';
+            <<v.optical_cycles.turns<<','<<v.optical_cycles.fraction;
+        if(unpolarized_)
+        {
+            const auto& f=second[std::size_t(p)*c.vertex_count()+i];
+            file<<','<<f.x.real<<','<<f.x.imag<<','<<f.y.real<<','<<f.y.imag;
+        }
+        file<<'\n';
     }
     file.flush();if(!file)throw std::runtime_error("Writing outgoing vertex CSV failed.");
 }
@@ -213,6 +249,7 @@ bool RaindropTracer::close_noexcept() noexcept
     if(!detail::report_cuda_cleanup_result(cuCtxSetCurrent(cuda_context_.handle()),"cuCtxSetCurrent(tracer cleanup)"))return false;
     bool ok=true;
     if(has_pending_work_){ok=detail::report_cuda_cleanup_result(cuStreamSynchronize(cuda_context_.stream()),"cuStreamSynchronize(tracer cleanup)")&&ok;has_pending_work_=false;}
+    ok=second_input_fields_.close_noexcept()&&ok;
     ok=vertices_.close_noexcept()&&ok;ok=device_params_.close_noexcept()&&ok;
     ok=device_config_.close_noexcept()&&ok;
     ok=gas_scratch_.close_noexcept()&&ok;ok=gas_output_.close_noexcept()&&ok;ok=aabb_.close_noexcept()&&ok;

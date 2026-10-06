@@ -171,10 +171,22 @@ def load(path: Path) -> dict:
     with path.open(encoding="utf-8-sig") as f:
         report = json.load(f, object_pairs_hook=no_duplicates,
                            parse_constant=lambda x: (_ for _ in ()).throw(ValueError(f"Invalid JSON {x}")))
-    if report.get("format") != FORMAT or report.get("report_complete") is not True:
+    if report.get("format") not in (FORMAT, "rainbow_patch_failure_witness_v2") or report.get("report_complete") is not True:
         raise ValueError("Wrong format or incomplete .part report")
     if report.get("changes_numerical_results") is not False:
         raise ValueError("Expected a read-only witness report")
+    if report.get("format") == "rainbow_patch_failure_witness_v2":
+        if report.get("input_polarization") != "unpolarized":
+            raise ValueError("v2 witness must declare unpolarized input")
+        if report["config"].get("input_coherency") != [0.5, 0, 0, 0.5]:
+            raise ValueError("Unsupported input coherency")
+        for patch in report["patches"]:
+            for v in patch["vertices"]:
+                values = v.get("second_input_field_bits")
+                if not isinstance(values, list) or len(values) != 4:
+                    raise ValueError("v2 witness is missing its second response column")
+                for bits in values:
+                    integer(bits, "second response bits")
     return report
 
 

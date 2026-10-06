@@ -59,6 +59,7 @@ public:
     [[nodiscard]] std::span<const FocalOpticalResult> host_focal_results() const noexcept { return host_focal_; }
     [[nodiscard]] std::span<const DiffractionResult> host_diffraction_results() const noexcept { return host_diffraction_; }
     void write_csv(const std::filesystem::path& path) const;
+    [[nodiscard]] bool is_unpolarized() const noexcept { return result_unpolarized_; }
     [[nodiscard]] bool has_result() const noexcept { return has_result_; }
     [[nodiscard]] const DeviceBuffer<PatchOpticalResult>& results() const noexcept { return results_; }
     [[nodiscard]] std::span<const PatchOpticalResult> host_results() const noexcept { return host_results_; }
@@ -73,6 +74,7 @@ private:
     FoldedPatchView prepare_folded(const PatchAccel&, const FocalPhaseConfig&, bool with_focal);
     void collect_folded_statistics(bool with_focal);
     void write_folded_metadata(std::ostream&) const;
+    void write_input_metadata(std::ostream&) const;
     const CudaContext& cuda_context_;
     CudaModule module_;
     CUfunction function_ = nullptr;
@@ -85,6 +87,7 @@ private:
     FoldedPatchConfig folded_config_{}, result_folded_config_{};
     FoldedPatchStatistics folded_statistics_{};
     bool folded_enabled_ = true, result_used_folded_ = false;
+    bool result_unpolarized_ = false;
     std::vector<FocalOpticalResult> host_focal_;
     std::vector<RainbowTransition> host_transitions_;
     std::vector<DiffractionResult> host_diffraction_;

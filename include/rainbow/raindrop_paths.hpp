@@ -11,19 +11,50 @@ namespace rainbow
 // CPU/OptiX は境界問い合わせだけを差し替える．アルゴリズム・phase/field 演算は共有する．
 struct RaindropPathTracer
 {
+    // Explicit single-input reference API, retained for existing tests.
     template<class Intersector>
     HOST_DEVICE static void trace_vertex(
-        const RaindropTraceConfig& config,const std::uint32_t index,
-        Intersector& intersector,OutgoingVertex* vertices) noexcept
+        const RaindropTraceConfig& config, const std::uint32_t index,
+        Intersector& intersector, OutgoingVertex* vertices) noexcept
+    {
+        trace_impl(config, index, intersector, vertices, nullptr, config.incident_field);
+    }
+
+    // Production unpolarized precomputation: the input coherency is I_2/2.
+    // Store two UNIT-input responses, not fields scaled by 1/sqrt(2).
+    // The factor 1/2 is applied once by the optical intensity evaluator.
+    template<class Intersector>
+    HOST_DEVICE static void trace_vertex_unpolarized(
+        const RaindropTraceConfig& config, const std::uint32_t index,
+        Intersector& intersector, OutgoingVertex* vertices, Field32* second_fields) noexcept
+    {
+        if(!second_fields) // Never silently fall back to a single input.
+        {
+            mark_remaining(vertices, config.vertex_count(), index, 0, VertexStatus::InvalidInterface, 0);
+            return;
+        }
+        trace_impl(config, index, intersector, vertices, second_fields, JonesResponse32::identity());
+    }
+
+private:
+    template<class Intersector, class Field>
+    HOST_DEVICE static void trace_impl(
+        const RaindropTraceConfig& config, const std::uint32_t index,
+        Intersector& intersector, OutgoingVertex* vertices, Field32* second_fields,
+        const Field input_response) noexcept
     {
         const std::uint32_t count=config.vertex_count();
-        for(unsigned family=0;family<4;++family) vertices[family*count+index]=OutgoingVertex{};
+        for(unsigned family=0;family<4;++family)
+        {
+            vertices[family*count+index]=OutgoingVertex{};
+            if(second_fields) second_fields[family*count+index] = {};
+        }
         const std::uint32_t ix=index%config.grid_width,iy=index/config.grid_width;
         const float u=(2.0f*static_cast<float>(ix)/static_cast<float>(config.grid_width-1)-1.0f)*config.grid_half_extent;
         const float v=(2.0f*static_cast<float>(iy)/static_cast<float>(config.grid_height-1)-1.0f)*config.grid_half_extent;
         const Vec3 w=config.incident_direction;
         const TransverseFrame frame{config.incident_basis_x,w.cross(config.incident_basis_x).normalized()};
-        PolarizedRay active{w,frame,config.incident_field};
+        BasicPolarizedRay<Field> active{w,frame,input_response};
         const Vec3 grid_point=(frame.e0*u+frame.e1*v)-w*config.reference_distance;
         const BoundaryHit entry=intersector.intersect({grid_point,w,0.0f,false});
         std::uint32_t diagnostics=entry.diagnostics;
@@ -41,7 +72,7 @@ struct RaindropPathTracer
         diagnostics|=branches.diagnostics;
         if(!branches.is_valid)
         {mark_remaining(vertices,count,index,0,VertexStatus::InvalidInterface,diagnostics);return;}
-        emit(vertices[index],branches.reflected,entry.position,path,config,diagnostics);
+        emit(vertices[index],second_fields ? &second_fields[index] : nullptr,branches.reflected,entry.position,path,config,diagnostics);
         if(!branches.has_transmission)
         {mark_remaining(vertices,count,index,1,VertexStatus::TotalInternalReflection,diagnostics);return;}
         active=branches.transmitted;
@@ -62,7 +93,7 @@ struct RaindropPathTracer
             if(!split.is_valid)
             {mark_remaining(vertices,count,index,family,VertexStatus::InvalidInterface,diagnostics);return;}
             if(split.has_transmission)
-                emit(vertices[family*count+index],split.transmitted,hit.position,path,config,diagnostics);
+                emit(vertices[family*count+index],second_fields ? &second_fields[family*count+index] : nullptr,split.transmitted,hit.position,path,config,diagnostics);
             else
             {
                 auto& vertex=vertices[family*count+index];
@@ -81,23 +112,33 @@ private:
         for(unsigned p=first;p<4;++p)
         {vertices[p*count+index].status=status;vertices[p*count+index].diagnostics=diagnostics;}
     }
-    HOST_DEVICE static void emit(OutgoingVertex& vertex,const PolarizedRay& outgoing,
+    HOST_DEVICE static bool finite_field(const Field32 f) noexcept
+    {
+        return ::fabsf(f.x.real)<=0x1.fffffep127f && ::fabsf(f.x.imag)<=0x1.fffffep127f
+            && ::fabsf(f.y.real)<=0x1.fffffep127f && ::fabsf(f.y.imag)<=0x1.fffffep127f;
+    }
+    HOST_DEVICE static bool finite_field(const JonesResponse32& f) noexcept { return f.is_finite(); }
+    HOST_DEVICE static void store_response(OutgoingVertex& vertex, Field32*, const Field32 f) noexcept
+    { vertex.field = f; }
+    HOST_DEVICE static void store_response(OutgoingVertex& vertex, Field32* second, const JonesResponse32& f) noexcept
+    { vertex.field = f.column[0]; *second = f.column[1]; }
+
+    template<class Field>
+    HOST_DEVICE static void emit(OutgoingVertex& vertex,Field32* second,const BasicPolarizedRay<Field>& outgoing,
         const Vec3 physical_point,OpticalPathAccumulator path,const RaindropTraceConfig& config,
         const std::uint32_t diagnostics) noexcept
     {
         const FloatPair after=FloatPair{config.outgoing_reference_distance,0}
             -FloatPair::dot(physical_point,outgoing.direction);
         vertex.diagnostics=diagnostics;
-        const auto& f=outgoing.field;
-        if(!(::fabsf(f.x.real)<=0x1.fffffep127f && ::fabsf(f.x.imag)<=0x1.fffffep127f
-             && ::fabsf(f.y.real)<=0x1.fffffep127f && ::fabsf(f.y.imag)<=0x1.fffffep127f))
+        if(!finite_field(outgoing.field))
         {vertex.status=VertexStatus::InvalidInterface;return;}
         if(!path.add_distance(after,config.exterior_index))
         {vertex.status=VertexStatus::PhaseOverflow;return;}
         vertex.position_drop=physical_point;
         vertex.direction_drop=outgoing.direction;
         vertex.basis_x=outgoing.frame.e0;
-        vertex.field=outgoing.field;
+        store_response(vertex, second, outgoing.field);
         vertex.optical_cycles=path.phase;
         vertex.status=VertexStatus::Valid;
     }

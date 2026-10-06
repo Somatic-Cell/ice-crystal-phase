@@ -84,12 +84,19 @@ class OpticsGrid:
         return metadata_float(self.metadata, "radius_mm", positive=True)
 
     @property
+    def is_unpolarized(self) -> bool:
+        return self.metadata.get("incident_polarization") == "unpolarized"
+
+    @property
     def jones(self) -> np.ndarray:
+        _require(not self.is_unpolarized, "Unpolarized input has no single Jones vector")
         x = metadata_vector(self.metadata, "incident_field", 4)
         return np.array([complex(x[0], x[1]), complex(x[2], x[3])])
 
     @property
     def incident_norm2(self) -> float:
+        if self.is_unpolarized:
+            return metadata_float(self.metadata, "incident_total_intensity", positive=True)
         j = self.jones
         return float(np.vdot(j, j).real)
 
@@ -162,15 +169,22 @@ def load_optics(path: str | Path) -> OpticsGrid:
         _require(not missing, f"Missing optical CSV columns: {sorted(missing)}")
         data = np.loadtxt(stream, delimiter=",", comments="#", dtype=np.float64,
                           usecols=[names.index(n) for n in SELECT_COLUMNS], ndmin=2)
-    _require(meta.get("format") == FORMAT, f"Expected {FORMAT}; do not pass vertices/patch/query CSV")
+    _require(meta.get("format") in (FORMAT, "rainbow_patch_optics_v2"), f"Expected {FORMAT}; do not pass vertices/patch/query CSV")
     _require(meta.get("order") == "theta_major_phi_minor", "Unsupported/missing angular storage order")
     _require(meta.get("angle_units") == "radians", "Only explicitly declared radians are supported")
-    _require(meta.get("quantity") == "regular_partial_model_angular_density_NOT_phase_function",
+    _require(meta.get("quantity") in ("regular_partial_model_angular_density_NOT_phase_function", "model_partial_angular_density_NOT_phase_function"),
              "Unsupported optical quantity; update the adapter explicitly for a new format")
     _require(meta.get("density_units") == "input_field_squared*drop_unit_squared_per_sr",
              "Unsupported density units")
     _require(meta.get("field_components") == "s_perpendicular,p_outgoing_cross_s", "Unsupported output basis")
-    _require(meta.get("input_states") == "one_coherent_Jones_state", "Expected a single coherent Jones input per file")
+    if meta.get("format") == "rainbow_patch_optics_v2":
+        _require(meta.get("input_states") == "unpolarized_two_orthogonal_unit_Jones_inputs"
+                 and meta.get("incident_polarization") == "unpolarized", "Invalid v2 input-state declaration")
+        _require(metadata_float(meta, "incident_total_intensity") == 1.0, "Expected unit incident total intensity")
+        _require(np.array_equal(metadata_vector(meta, "input_coherency", 4), [0.5, 0, 0, 0.5]), "Unsupported input coherency")
+    else:
+        _require(meta.get("input_states") == "one_coherent_Jones_state", "Expected a single coherent Jones input per v1 file")
+        _require(meta.get("incident_polarization") != "unpolarized", "Unpolarized data needs schema v2")
     _require(not metadata_bool(meta, "normalized"), "Normalized files need a different unit conversion")
     ntheta = metadata_float(meta, "theta_count", positive=True)
     nphi = metadata_float(meta, "phi_count", positive=True)
@@ -263,7 +277,7 @@ class IntensityView:
         return list(dict.fromkeys(message for g in self.grids for message in g.warnings()))
 
     def label(self) -> str:
-        state = "unpolarized intensity average" if self.is_unpolarized else "single Jones input"
+        state = ("C++ unpolarized input" if self.grid.is_unpolarized else "unpolarized intensity average") if self.is_unpolarized else "single Jones input"
         return f"{self.stage} / {self.component}; {state}; regular partial model"
 
 
@@ -271,7 +285,8 @@ def make_view(first: OpticsGrid, stage: str = "path", component: str = "total",
               orthogonal: OpticsGrid | None = None) -> IntensityView:
     value = first.density(stage, component)
     if orthogonal is None:
-        return IntensityView((first,), stage, component, value, first.known_complete.copy(), first.numerical_valid.copy(), False)
+        return IntensityView((first,), stage, component, value, first.known_complete.copy(), first.numerical_valid.copy(), first.is_unpolarized)
+    _require(not first.is_unpolarized and not orthogonal.is_unpolarized, "Do not average an already unpolarized file with another input")
     other = orthogonal
     _require(first.shape == other.shape and np.array_equal(first.theta, other.theta)
              and np.array_equal(first.phi, other.phi), "The two input-state grids must match; no resampling is performed")

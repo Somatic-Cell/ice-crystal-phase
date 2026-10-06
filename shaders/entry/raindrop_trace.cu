@@ -46,13 +46,17 @@ struct OptixBoundaryIntersector
 };
 }
 
-extern "C" __global__ void __raygen__raindrop_trace()
+extern "C" __global__ void __raygen__raindrop_trace_v2()
 {
     const unsigned index=optixGetLaunchIndex().x;
     if(index>=raindrop_trace_params.config->vertex_count()) return;
     OptixBoundaryIntersector intersector;
-    rainbow::RaindropPathTracer::trace_vertex(*raindrop_trace_params.config,index,
-        intersector,raindrop_trace_params.vertices);
+    if(raindrop_trace_params.second_input_fields)
+        rainbow::RaindropPathTracer::trace_vertex_unpolarized(*raindrop_trace_params.config,index,
+            intersector,raindrop_trace_params.vertices,raindrop_trace_params.second_input_fields);
+    else
+        rainbow::RaindropPathTracer::trace_vertex(*raindrop_trace_params.config,index,
+            intersector,raindrop_trace_params.vertices);
 }
 
 extern "C" __global__ void __intersection__raindrop()

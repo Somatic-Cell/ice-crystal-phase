@@ -6,31 +6,81 @@
 namespace rainbow
 {
 
-struct PolarizedRay
+template<class Field> struct BasicPolarizedRay
 {
     Vec3 direction;
     TransverseFrame frame;
-    Field32 field;
+    Field field;
 };
-struct InterfaceBranches
+using PolarizedRay = BasicPolarizedRay<Field32>;
+using JonesResponseRay = BasicPolarizedRay<JonesResponse32>;
+
+template<class Field> struct BasicInterfaceBranches
 {
-    PolarizedRay reflected;
-    PolarizedRay transmitted;
+    BasicPolarizedRay<Field> reflected;
+    BasicPolarizedRay<Field> transmitted;
     bool has_transmission=false;
     bool is_valid=false;
     std::uint32_t diagnostics=0;
 };
+
+using InterfaceBranches = BasicInterfaceBranches<Field32>;
+using JonesInterfaceBranches = BasicInterfaceBranches<JonesResponse32>;
 
 // 電場振幅係数を使う．反射・透過の選択，ロシアンルーレット，振幅による枝刈りはしない．
 // 固定規約: s = normalize(w_i x n), p_i = w_i x s,
 // p_r = w_r x s, p_t = w_t x s．n は入射媒質側を向く法線．
 struct DielectricInterface
 {
+    // Both entry points use the SAME geometric and Fresnel calculation.
+    // The second input changes only the number of field columns applied to it.
     HOST_DEVICE static InterfaceBranches split(
-        const PolarizedRay& incoming,const Vec3 oriented_normal,
-        const float n_i,const float n_t) noexcept
+        const PolarizedRay& incoming, const Vec3 normal,
+        const float n_i, const float n_t) noexcept
+    { return split_impl(incoming, normal, n_i, n_t); }
+
+    HOST_DEVICE static JonesInterfaceBranches split(
+        const JonesResponseRay& incoming, const Vec3 normal,
+        const float n_i, const float n_t) noexcept
+    { return split_impl(incoming, normal, n_i, n_t); }
+
+private:
+    HOST_DEVICE static Field32 into_sp(const Field32 f, const TransverseFrame frame,
+                                       const Vec3 s, const Vec3 p) noexcept
     {
-        InterfaceBranches output{};
+        return {f.x * frame.e0.dot(s) + f.y * frame.e1.dot(s),
+                f.x * frame.e0.dot(p) + f.y * frame.e1.dot(p)};
+    }
+    HOST_DEVICE static JonesResponse32 into_sp(const JonesResponse32& f,
+        const TransverseFrame frame, const Vec3 s, const Vec3 p) noexcept
+    {
+        const float a = frame.e0.dot(s), b = frame.e1.dot(s);
+        const float c = frame.e0.dot(p), d = frame.e1.dot(p);
+        JonesResponse32 result{};
+        for(unsigned j = 0; j < 2; ++j)
+            result.column[j] = {f.column[j].x * a + f.column[j].y * b,
+                                f.column[j].x * c + f.column[j].y * d};
+        return result;
+    }
+    HOST_DEVICE static Field32 scale_sp(const Field32 f,
+        const Complex32 s, const Complex32 p) noexcept { return {f.x * s, f.y * p}; }
+    HOST_DEVICE static Field32 scale_sp(const Field32 f,
+        const float s, const float p) noexcept { return {f.x * s, f.y * p}; }
+    template<class Coefficient>
+    HOST_DEVICE static JonesResponse32 scale_sp(const JonesResponse32& f,
+        const Coefficient s, const Coefficient p) noexcept
+    {
+        JonesResponse32 result{};
+        for(unsigned j = 0; j < 2; ++j) result.column[j] = scale_sp(f.column[j], s, p);
+        return result;
+    }
+
+    template<class Field>
+    HOST_DEVICE static BasicInterfaceBranches<Field> split_impl(
+        const BasicPolarizedRay<Field>& incoming, const Vec3 oriented_normal,
+        const float n_i, const float n_t) noexcept
+    {
+        BasicInterfaceBranches<Field> output{};
         const Vec3 wi=incoming.direction;
         const Vec3 n=oriented_normal;
         float cosine=-wi.dot(n);
@@ -41,10 +91,7 @@ struct DielectricInterface
         if(sin2>0x1p-40f) s=s/::sqrtf(sin2);
         else s=(incoming.frame.e0-wi*wi.dot(incoming.frame.e0)).normalized();
         const Vec3 pi=wi.cross(s).normalized();
-        const Complex32 es=incoming.field.x*incoming.frame.e0.dot(s)
-            +incoming.field.y*incoming.frame.e1.dot(s);
-        const Complex32 ep=incoming.field.x*incoming.frame.e0.dot(pi)
-            +incoming.field.y*incoming.frame.e1.dot(pi);
+        const auto local_field = into_sp(incoming.field, incoming.frame, s, pi);
 
         const float eta=n_i/n_t;
         float discriminant=::fmaf(-(eta*eta),sin2,1.0f);
@@ -79,10 +126,10 @@ struct DielectricInterface
             const float ts=2.0f*n_i*cosine/ds;
             const float tp=2.0f*n_i*cosine/dp;
             const Vec3 wt=(wi*eta+n*(eta*cosine-ct)).normalized();
-            output.transmitted={wt,{s,wt.cross(s).normalized()},{es*ts,ep*tp}};
+            output.transmitted={wt,{s,wt.cross(s).normalized()},scale_sp(local_field, ts, tp)};
             output.has_transmission=true;
         }
-        output.reflected.field={es*rs,ep*rp};
+        output.reflected.field=scale_sp(local_field, rs, rp);
         output.is_valid=wr.is_finite() && (!output.has_transmission||output.transmitted.direction.is_finite());
         return output;
     }

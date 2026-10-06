@@ -48,15 +48,19 @@ private:
 bool finite_optical(const PatchOpticalResult& o) noexcept
 {
     const auto& f=o.regular_partial_path_field;
+    const auto& g=o.regular_partial_path_field_second;
     return std::isfinite(o.regular_partial_incoherent_s)&&std::isfinite(o.regular_partial_incoherent_p)
         &&std::isfinite(o.regular_partial_path_s)&&std::isfinite(o.regular_partial_path_p)
-        &&std::isfinite(f.s_real)&&std::isfinite(f.s_imag)&&std::isfinite(f.p_real)&&std::isfinite(f.p_imag);
+        &&std::isfinite(f.s_real)&&std::isfinite(f.s_imag)&&std::isfinite(f.p_real)&&std::isfinite(f.p_imag)
+        &&std::isfinite(g.s_real)&&std::isfinite(g.s_imag)&&std::isfinite(g.p_real)&&std::isfinite(g.p_imag);
 }
 bool finite_focal(const FocalOpticalResult& f) noexcept
 {
     return std::isfinite(f.intensity_s)&&std::isfinite(f.intensity_p)
         &&std::isfinite(f.field.s_real)&&std::isfinite(f.field.s_imag)
-        &&std::isfinite(f.field.p_real)&&std::isfinite(f.field.p_imag);
+        &&std::isfinite(f.field.p_real)&&std::isfinite(f.field.p_imag)
+        &&std::isfinite(f.field_second.s_real)&&std::isfinite(f.field_second.s_imag)
+        &&std::isfinite(f.field_second.p_real)&&std::isfinite(f.field_second.p_imag);
 }
 }
 
@@ -68,6 +72,8 @@ PatchFailureReport PatchFailureReport::capture(
     if(!source.has_result() || !query.matches_source(source) || !optics.has_result()
        || !optics.has_wave_result() || query.direction_grid()==nullptr)
         throw std::logic_error("Patch audit requires one unchanged completed trace/build/query/wave result.");
+    if(source.is_unpolarized()!=optics.is_unpolarized())
+        throw std::invalid_argument("Patch audit: incident-state representation mismatch.");
     const auto* grid=query.direction_grid();
     const auto n=query.host_summaries().size();
     if(grid->size()!=n || n!=query.host_directions().size() || query.host_offsets().size()!=n+1
@@ -81,6 +87,7 @@ PatchFailureReport PatchFailureReport::capture(
     RAINBOW_CUDA_CHECK(cuStreamSynchronize(context.stream()));
     PatchFailureSnapshot result{};
     result.origin=PatchWitnessOrigin::GpuCapture;
+    result.input_polarization = source.is_unpolarized() ? IncidentPolarization::Unpolarized : IncidentPolarization::SingleJones;
     result.config=config;result.wave_settings=wave_settings;
     result.theta_count=grid->theta_count;result.phi_count=grid->phi_count;
     result.stored_patch_count=source.statistics().patch_count;
@@ -89,6 +96,7 @@ PatchFailureReport PatchFailureReport::capture(
     WitnessReader reader(result);
     std::map<std::uint32_t,OutgoingPatch> patch_cache;
     std::map<std::uint32_t,OutgoingVertex> vertex_cache;
+    std::map<std::uint32_t,Field32> second_cache;
     std::set<std::uint32_t> wanted_compact,problem_ids;
     const auto read_patch=[&](const std::uint32_t compact)->const OutgoingPatch&
     {
@@ -160,6 +168,13 @@ PatchFailureReport PatchFailureReport::capture(
             if(it==vertex_cache.end())
                 it=vertex_cache.emplace(id,reader.one<OutgoingVertex>(source.source_vertices_address(),vertex_count,id)).first;
             record.vertices[k]=it->second;
+            if(source.is_unpolarized())
+            {
+                auto jt=second_cache.find(id);
+                if(jt==second_cache.end()) jt=second_cache.emplace(id,
+                    reader.one<Field32>(source.source_second_fields_address(),vertex_count,id)).first;
+                record.second_input_fields[k]=jt->second;
+            }
         }
         result.patches.push_back(record);
     }

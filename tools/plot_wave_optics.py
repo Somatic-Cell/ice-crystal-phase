@@ -22,8 +22,8 @@ def load(path: Path):
                     meta[key] = value
             else:
                 break
-    if meta.get("format") != "rainbow_wave_optics_v1":
-        raise ValueError("Expected rainbow_wave_optics_v1, not the path-only optics CSV.")
+    if meta.get("format") not in ("rainbow_wave_optics_v1", "rainbow_wave_optics_v2"):
+        raise ValueError("Expected rainbow_wave_optics_v1/v2, not the path-only optics CSV.")
     rows, cols = int(meta["theta_count"]), int(meta["phi_count"])
     if rows < 2 or cols < 1:
         raise ValueError("Invalid angular grid.")
@@ -71,11 +71,24 @@ def main() -> int:
         if not (np.allclose(data["theta_rad"], np.pi * (rr + .5) / rows, rtol=0, atol=1e-12)
                 and np.allclose(data["phi_rad"], -np.pi + 2*np.pi*(cc+.5)/cols, rtol=0, atol=1e-12)):
             raise ValueError("Angular convention mismatch.")
-        jones = np.array([float(x) for x in meta["incident_field"].split(",")])
         radius = float(meta["radius_mm"])
-        norm2 = float(jones @ jones)
-        if jones.shape != (4,) or not np.isfinite(jones).all() or not np.isfinite(norm2) or not norm2 > 0 or not np.isfinite(radius) or radius <= 0:
-            raise ValueError("Invalid input field or radius.")
+        if meta.get("format") == "rainbow_wave_optics_v2":
+            if (meta.get("incident_polarization") != "unpolarized"
+                or meta.get("input_states") != "unpolarized_two_orthogonal_unit_Jones_inputs"
+                or meta.get("input_coherency") != "0.5,0,0,0.5"):
+                raise ValueError("Invalid unpolarized v2 metadata")
+            norm2 = float(meta["incident_total_intensity"])
+            if norm2 != 1.0:
+                raise ValueError("Expected unit incident total intensity")
+            state_label = "unpolarized input"
+        else:
+            jones = np.array([float(x) for x in meta["incident_field"].split(",")])
+            norm2 = float(jones @ jones)
+            if jones.shape != (4,) or not np.isfinite(jones).all():
+                raise ValueError("Invalid input Jones field")
+            state_label = "single Jones input"
+        if not np.isfinite(norm2) or not norm2 > 0 or not np.isfinite(radius) or radius <= 0:
+            raise ValueError("Invalid input intensity or radius.")
         values = data[f"{args.stage}_{args.component}"] * (radius * radius / norm2)
         if args.stage == "focal":
             valid = data["focal_valid"] == 1
@@ -106,7 +119,7 @@ def main() -> int:
         ax.set_ylim(180, 0)
         ax.set_xlabel("Azimuth phi [deg]")
         ax.set_ylabel("Scattering angle theta [deg]")
-        ax.set_title(f"C++ {args.stage} / {args.component}; a={radius:g} mm\n"
+        ax.set_title(f"C++ {args.stage} / {args.component}; {state_label}; a={radius:g} mm\n"
                      "Explicit project conventions; source coverage uncertified")
         fig.colorbar(image, ax=ax, label="Model angular density [mm$^2$/sr]")
         args.out.parent.mkdir(parents=True, exist_ok=True)

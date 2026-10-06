@@ -113,7 +113,6 @@ int run(const std::filesystem::path& optics_module, const std::filesystem::path&
 
     // この旧仕様の比較テストだけを，従来の評価モードに固定する．
     optics.enable_folded_patches(false);
-
     optics.evaluate(accel, query, config);
     tests::require_optics(optics.statistics().error_directions==0u,"Integration optical numerical error.");
     tests::require_optics(optics.statistics().pending_directions!=0u,"Folded/boundary hits were silently treated as complete.");

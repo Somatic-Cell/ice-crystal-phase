@@ -41,33 +41,56 @@ if not exist outputs mkdir outputs
 
 @REM echo Exit code: %ERRORLEVEL%
 
-if not exist outputs\patch_audit_a1_g129 mkdir outputs\patch_audit_a1_g129
+@REM if not exist outputs\patch_audit_a1_g129 mkdir outputs\patch_audit_a1_g129
 
-build\Debug\rainbow_trace.exe ^
-    build\Debug\modules\raindrop_trace.optixir ^
-    outputs\patch_audit_a1_g129\vertices.csv ^
-    --radius-mm 1.0 ^
-    --wavelength-nm 700 ^
-    --ior 1.3314 ^
-    --grid 3001 ^
-    --inclination-deg 20 ^
-    --polarization x ^
-    --patch-module build\Debug\modules\patch_build.fatbin ^
-    --query-module build\Debug\modules\patch_query.optixir ^
-    --query-theta 360 ^
-    --query-phi 720 ^
-    --query-csv outputs\patch_audit_a1_g129\queries.csv ^
-    --query-hits-csv outputs\patch_audit_a1_g129\hits.csv ^
-    --optics-module build\Debug\modules\patch_optics.fatbin ^
-    --optics-csv outputs\patch_audit_a1_g129\optics.csv ^
-    --wave-csv outputs\patch_audit_a1_g129\wave.csv ^
-    --focal-offsets 0,0,0,0 ^
-    > outputs\patch_audit_a1_g129\run.log 2>&1
+@REM build\Debug\rainbow_trace.exe ^
+@REM     build\Debug\modules\raindrop_trace.optixir ^
+@REM     outputs\patch_audit_a1_g129\vertices.csv ^
+@REM     --radius-mm 1.0 ^
+@REM     --wavelength-nm 700 ^
+@REM     --ior 1.3314 ^
+@REM     --grid 3001 ^
+@REM     --inclination-deg 20 ^
+@REM     --polarization x ^
+@REM     --patch-module build\Debug\modules\patch_build.fatbin ^
+@REM     --query-module build\Debug\modules\patch_query.optixir ^
+@REM     --query-theta 360 ^
+@REM     --query-phi 720 ^
+@REM     --query-csv outputs\patch_audit_a1_g129\queries.csv ^
+@REM     --query-hits-csv outputs\patch_audit_a1_g129\hits.csv ^
+@REM     --optics-module build\Debug\modules\patch_optics.fatbin ^
+@REM     --optics-csv outputs\patch_audit_a1_g129\optics.csv ^
+@REM     --wave-csv outputs\patch_audit_a1_g129\wave.csv ^
+@REM     --focal-offsets 0,0,0,0 ^
+@REM     > outputs\patch_audit_a1_g129\run.log 2>&1
 
-echo Exit code: %ERRORLEVEL%
+@REM echo Exit code: %ERRORLEVEL%
 
 @REM .venv\Scripts\python.exe tools\analyze_patch_failures.py ^
 @REM     outputs\patch_audit_a1_g129\patch_failure_report.json ^
 @REM     --out outputs\patch_audit_a1_g129\exact_audit
 
-echo Audit exit: %ERRORLEVEL%
+@REM echo Audit exit: %ERRORLEVEL%
+
+if not exist outputs\unpolarized_a1_g129 mkdir outputs\unpolarized_a1_g129
+
+build\Debug\rainbow_trace.exe ^
+    build\Debug\modules\raindrop_trace.optixir ^
+    outputs\unpolarized_a1_g129\vertices.csv ^
+    --radius-mm 1.0 ^
+    --wavelength-nm 700 ^
+    --ior 1.3314 ^
+    --grid 129 ^
+    --inclination-deg 20 ^
+    --patch-module build\Debug\modules\patch_build.fatbin ^
+    --query-module build\Debug\modules\patch_query.optixir ^
+    --query-theta 900 ^
+    --query-phi 1800 ^
+    --query-csv outputs\unpolarized_a1_g129\queries.csv ^
+    --optics-module build\Debug\modules\patch_optics.fatbin ^
+    --optics-csv outputs\unpolarized_a1_g129\optics.csv ^
+    --wave-csv outputs\unpolarized_a1_g129\wave.csv ^
+    --focal-offsets 0,0,0,0 ^
+    > outputs\unpolarized_a1_g129\run.log 2>&1
+
+echo Exit code: %ERRORLEVEL%

@@ -7,8 +7,8 @@
 @REM cd ..
 
 cmake -S . -B build -DBUILD_TESTING=ON && ^
-cmake --build build --config Debug && ^
+cmake --build build --config Debug --clean-first && ^
 ctest --test-dir build -C Debug --output-on-failure --no-tests=error
 
 .venv\Scripts\python.exe -m unittest discover ^
-    -s tests -p test_patch_failure_analysis.py -v
+    -s tests -p test_unpolarized_io.py -v

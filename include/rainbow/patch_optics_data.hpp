@@ -42,7 +42,7 @@ struct OpticalField64
 
 struct PatchOpticalResult
 {
-    // Historical field names retained for source/ABI compatibility. With the
+    // Historical field names retained for source compatibility (output ABI v2). With the
     // optional folded-patch view, these sums also include resolved branch hits.
     // A numeric error makes all values NaN; unsupported hits remain explicit.
     OpticalField64 regular_partial_path_field{};
@@ -62,6 +62,10 @@ struct PatchOpticalResult
     std::uint32_t first_problem_patch_id = 0xffffffffu;
     // Formerly reserved ABI word. Tests that use it as an output guard still work.
     std::uint32_t reserved = 0;
+    // In unpolarized mode, these two fields are response columns, not one
+    // physical unpolarized electric field. The scalar intensities above already
+    // include the 1/2 incident-state average. Legacy mode leaves column 1 zero.
+    OpticalField64 regular_partial_path_field_second{};
     [[nodiscard]] HOST_DEVICE std::uint32_t folded_evaluated_hits() const noexcept
     { return reserved; }
 
@@ -93,13 +97,16 @@ struct PatchOpticsParams
     std::uint32_t reserved = 0;
     Vec3 incident_direction{};
     Vec3 incident_basis_x{};
+    const Field32* second_input_fields = nullptr;
+    std::uint32_t second_input_count = 0;
+    IncidentPolarization input_polarization = IncidentPolarization::SingleJones;
 };
 
 static_assert(sizeof(OpticalField64) == 32);
-static_assert(sizeof(PatchOpticalResult) == 104 && alignof(PatchOpticalResult) == 8);
+static_assert(sizeof(PatchOpticalResult) == 136 && alignof(PatchOpticalResult) == 8);
 static_assert(offsetof(PatchOpticalResult, hit_count) == 64);
 static_assert(sizeof(void*) == 8);
-static_assert(sizeof(PatchOpticsParams) == 104 && alignof(PatchOpticsParams) == 8);
+static_assert(sizeof(PatchOpticsParams) == 120 && alignof(PatchOpticsParams) == 8);
 static_assert(offsetof(PatchOpticsParams, incident_direction) == 80);
 static_assert(std::is_standard_layout_v<PatchOpticalResult>);
 static_assert(std::is_trivially_copyable_v<PatchOpticalResult>);

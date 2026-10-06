@@ -62,7 +62,7 @@ struct FoldedPatchView
         return r->compact_index == compact ? r : nullptr;
     }
 };
-// Legacy PatchOpticsParams / WaveOpticsParams ABIs remain unchanged.
+// The wave parameters include the optional second incident-response column.
 struct FoldedPrepareParams
 {
     const OutgoingVertex* vertices = nullptr;
@@ -95,5 +95,5 @@ static_assert(std::is_trivially_copyable_v<FoldedPrepareParams>);
 static_assert(std::is_trivially_copyable_v<FoldedOpticsParams>);
 static_assert(sizeof(FoldedPatchView) == 24);
 static_assert(sizeof(FoldedBranch) == 64 && sizeof(FoldedPatchRecord) == 320);
-static_assert(sizeof(FoldedPrepareParams) == 120 && sizeof(FoldedOpticsParams) == 176);
+static_assert(sizeof(FoldedPrepareParams) == 120 && sizeof(FoldedOpticsParams) == 192);
 } // namespace rainbow

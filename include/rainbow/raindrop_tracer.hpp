@@ -32,7 +32,15 @@ public:
     RaindropTracer& operator=(RaindropTracer&&)=delete;
 
     void create_pipeline(const std::filesystem::path& optixir_path);
+    // Explicit legacy single-input API. The application uses trace_unpolarized.
     void trace(const RaindropSettings& settings);
+    // One geometric trace, two unit-input Jones response columns.
+    // settings.incident_field belongs only to trace(); it is not a source here.
+    void trace_unpolarized(const RaindropSettings& settings);
+    [[nodiscard]] std::vector<Field32> download_second_input_fields() const;
+    [[nodiscard]] bool is_unpolarized() const noexcept { return unpolarized_; }
+    [[nodiscard]] bool has_result() const noexcept { return has_result_; }
+    [[nodiscard]] const DeviceBuffer<Field32>& second_input_fields() const noexcept { return second_input_fields_; }
     [[nodiscard]] std::vector<OutgoingVertex> download_vertices() const;
     void write_csv(const std::filesystem::path& output_path) const;
     // 既に readback したデータを使う場合，巨大な vertex buffer を二重にコピーしない．
@@ -48,6 +56,7 @@ public:
 private:
     struct alignas(OPTIX_SBT_RECORD_ALIGNMENT) HeaderRecord {char header[OPTIX_SBT_RECORD_HEADER_SIZE];};
     static_assert(sizeof(HeaderRecord)%OPTIX_SBT_RECORD_ALIGNMENT==0);
+    void trace_impl(const RaindropSettings&, bool unpolarized);
     void build_drop_gas();
     void synchronize();
 
@@ -62,6 +71,8 @@ private:
     DeviceBuffer<RaindropTraceParams> device_params_;
     DeviceBuffer<RaindropTraceConfig> device_config_;
     DeviceBuffer<OutgoingVertex> vertices_;
+    DeviceBuffer<Field32> second_input_fields_;
+    bool unpolarized_ = false;
     // async 転送の入力は，例外経路で同期が終わるまで生存するメンバに置く．
     HeaderRecord host_raygen_{},host_miss_{},host_hit_{};
     OptixAabb host_aabb_{};

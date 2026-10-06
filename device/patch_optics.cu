@@ -66,3 +66,8 @@ extern "C" __global__ void evaluate_folded_optics(rainbow::FoldedOpticsParams p)
         p.wave.optical,i,p.with_focal?&p.wave.focal:nullptr,
         p.with_focal?p.wave.focal_results+i:nullptr,p.folded);
 }
+
+// Host load_module() requires this symbol before interpreting any v2 result or
+// parameter layout. Never launched. Prevents a stale v1 fatbin from silently
+// consuming the enlarged two-input structs.
+extern "C" __global__ void rainbow_two_input_optics_abi_v2() {}

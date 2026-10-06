@@ -1,6 +1,7 @@
 #pragma once
 
 #include <rainbow/field32.hpp>
+#include <rainbow/jones_response32.hpp>
 #include <rainbow/vec3.hpp>
 
 #include <cmath>
@@ -134,6 +135,43 @@ struct PolarizationTransport
             {static_cast<float>(x_real), static_cast<float>(x_imag)},
             {static_cast<float>(y_real), static_cast<float>(y_imag)}
         };
+        return true;
+    }
+
+    // Prepare the shared geometric transport once, then apply it to both input
+    // columns. Keep the arithmetic within a column identical to try_transport().
+    [[nodiscard]] HOST_DEVICE static bool try_transport_response(
+        const Vec3 source_direction, const TransverseFrame source_frame,
+        const JonesResponse32& source, const Vec3 target_direction,
+        const TransverseFrame target_frame, JonesResponse32& output) noexcept
+    {
+        if(!source.is_finite() || !is_unit(source_direction) || !is_unit(target_direction)
+           || !is_frame(source_direction, source_frame) || !is_frame(target_direction, target_frame)) return false;
+        const DVec3 source_w = source_direction.cast<double>().normalized();
+        const DVec3 target_w = target_direction.cast<double>().normalized();
+        const double cosine = source_w.dot(target_w);
+        if(!(1.0 + cosine > antipodal_threshold)) return false;
+        const DVec3 source_e0 = source_frame.e0.cast<double>();
+        const DVec3 source_e1 = source_frame.e1.cast<double>();
+        const DVec3 target_e0 = target_frame.e0.cast<double>();
+        const DVec3 target_e1 = target_frame.e1.cast<double>();
+        JonesResponse32 candidate{};
+        for(unsigned j = 0; j < 2; ++j)
+        {
+            const auto& f = source.column[j];
+            const DVec3 real_world = source_e0 * static_cast<double>(f.x.real)
+                                  + source_e1 * static_cast<double>(f.y.real);
+            const DVec3 imag_world = source_e0 * static_cast<double>(f.x.imag)
+                                  + source_e1 * static_cast<double>(f.y.imag);
+            const auto real_transported = minimum_rotation(real_world, source_w, target_w, cosine);
+            const auto imag_transported = minimum_rotation(imag_world, source_w, target_w, cosine);
+            const double xr = real_transported.dot(target_e0), xi = imag_transported.dot(target_e0);
+            const double yr = real_transported.dot(target_e1), yi = imag_transported.dot(target_e1);
+            if(!fits_float(xr) || !fits_float(xi) || !fits_float(yr) || !fits_float(yi)) return false;
+            candidate.column[j] = {{static_cast<float>(xr), static_cast<float>(xi)},
+                                   {static_cast<float>(yr), static_cast<float>(yi)}};
+        }
+        output = candidate;
         return true;
     }
 

@@ -36,7 +36,7 @@ struct TraceCommandLine
         if(argc<3) throw std::invalid_argument(
             "Usage: rainbow_trace <raindrop_trace.optixir> <vertices.csv> [--radius-mm value] "
             "[--grid count] [--inclination-deg value] [--azimuth-deg value] "
-            "[--wavelength-nm value --ior value] [--polarization x|y] [--sphere] "
+            "[--wavelength-nm value --ior value] [--polarization unpolarized] [--sphere] "
             "[--patch-module patch_build.fatbin] [--patch-csv patches.csv] "
             "[--query-module patch_query.optixir --query-csv queries.csv] "
             "[--query-hits-csv hits.csv] [--query-theta N --query-phi N] "
@@ -117,9 +117,8 @@ struct TraceCommandLine
             }
             if(option=="--polarization")
             {
-                if(value=="x")command.settings.incident_field={{1,0},{0,0}};
-                else if(value=="y")command.settings.incident_field={{0,0},{1,0}};
-                else throw std::invalid_argument("polarization must be x or y (separate coherent input states).");
+                if(value!="unpolarized")
+                    throw std::invalid_argument("The application now computes unit unpolarized input. Remove --polarization x/y; use the explicit single-input library API for diagnostics.");
                 continue;
             }
             if(option=="--grid" || option=="--query-theta" || option=="--query-phi")
@@ -206,7 +205,8 @@ template<class Char> int run(const int argc,Char* argv[])
         rainbow::RaindropTracer tracer(cuda_context);
 
         tracer.create_pipeline(command.module_path);
-        tracer.trace(command.settings);
+        tracer.trace_unpolarized(command.settings);
+        std::cout << "Input: unpolarized, two unit Jones response columns, one geometric trace.\n";
         // 診断があっても CSV に保存する．数値失敗は成功とせず exit code 1 で通知する．
         const auto vertices=tracer.download_vertices();
         tracer.write_csv(command.output_path,std::span<const rainbow::OutgoingVertex>{vertices});
@@ -237,7 +237,7 @@ template<class Char> int run(const int argc,Char* argv[])
             // the CSV/readback vertices: build() consumes the existing GPU buffer.
             rainbow::PatchAccel patches(cuda_context,tracer.optix_context());
             patches.load_module(command.patch_module_path);
-            patches.build(tracer.vertices(),tracer.config());
+            patches.build(tracer);
             const auto& stats=patches.statistics();
             using Status=rainbow::PatchCellStatus;
             std::cout<<"Patch geometry: logical_cells="<<stats.logical_cell_count
@@ -322,7 +322,7 @@ template<class Char> int run(const int argc,Char* argv[])
                         <<", evaluated_hits="<<optical.evaluated_hits
                         <<", rejected_hits="<<optical.rejected_hits<<'\n';
                     std::cout<<"Saved "<<command.optics_csv_path
-                        <<" (regular partial optical densities, NOT a complete phase function).\n";
+                        <<" (unpolarized angular densities, NOT a certified phase function).\n";
                     if(command.wave_csv_path.empty())
                         std::cout<<"Focal-line phase and diffraction are not enabled in this run.\n";
                     std::cout<<"Source coverage and boundary ownership remain uncertified.\n";

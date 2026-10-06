@@ -6,6 +6,7 @@
 #include <rainbow/raindrop_shape.hpp>
 #include <rainbow/phase_cycles.hpp>
 #include <rainbow/field32.hpp>
+#include <rainbow/jones_response32.hpp>
 
 namespace rainbow
 {
@@ -43,7 +44,10 @@ struct OutgoingVertex
     Vec3 position_drop{};       // 無次元．world/mm へ移さず後段へ渡す．
     Vec3 direction_drop{};
     Vec3 basis_x{};             // basis_y は direction_drop と basis_x の外積で求まり，自明なので保持しない
-    Field32 field{};            // 伝播・焦線位相，patch の面積比は未適用
+    // SingleJones: the supplied incident field's response.
+    // Unpolarized: unit input column 0. Column 1 is in a parallel Field32 buffer.
+    // Neither column includes propagation/focal/patch-area factors.
+    Field32 field{};
     PhaseCycles optical_cycles{};
     VertexStatus status=VertexStatus::Unwritten;
     std::uint32_t diagnostics=TraceDiagnostic::NoDiagnostic;
@@ -100,13 +104,16 @@ struct alignas(8) RaindropTraceParams
     OutgoingVertex* vertices;
     std::uint64_t traversable;
     const RaindropTraceConfig* config;
+    // Null for the explicit legacy single-Jones trace; path-major like vertices.
+    Field32* second_input_fields;
 };
 
 static_assert(sizeof(void*)==8, "This project requires a 64-bit build.");
-static_assert(sizeof(RaindropTraceParams)==24);
+static_assert(sizeof(RaindropTraceParams)==32);
 static_assert(alignof(RaindropTraceParams)==8);
 static_assert(std::is_trivially_default_constructible_v<RaindropTraceParams>);
 static_assert(std::is_standard_layout_v<RaindropTraceParams>);
 static_assert(offsetof(RaindropTraceParams,config)==16);
+static_assert(offsetof(RaindropTraceParams,second_input_fields)==24);
 static_assert(std::is_trivially_copyable_v<RaindropTraceParams>);
 }

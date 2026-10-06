@@ -19,6 +19,7 @@ struct PatchOpticalEvaluator
     struct Contribution
     {
         OpticalField64 path_field{};
+        OpticalField64 path_field_second{};
         double incoherent_s = 0.0, incoherent_p = 0.0;
     };
 
@@ -27,7 +28,8 @@ struct PatchOpticalEvaluator
         const OutgoingPatch& patch, const PatchQueryHit& hit,
         const Vec3 direction, const TransverseFrame target_frame,
         Contribution& output, const FoldedPatchRecord* folded = nullptr,
-        const FoldedBranch** used_branch = nullptr) noexcept
+        const FoldedBranch** used_branch = nullptr,
+        const Field32* second_input_fields = nullptr) noexcept
     {
         if(used_branch) *used_branch = nullptr;
         if(!vertices || (hit.flags & ~(BilinearBoundary | BilinearSingular | BilinearUsedFp64)) != 0u
@@ -62,7 +64,9 @@ struct PatchOpticalEvaluator
         if(!(area > 0.0 && finite(area) && omega > 0.0 && finite(omega)))
             return PatchOpticalInvalidInput;
 
-        Field32 transported[4]{};
+        const unsigned columns = second_input_fields ? 2u : 1u;
+        const double input_weight = second_input_fields ? 0.5 : 1.0;
+        Field32 transported[2][4]{};
         PhaseCycles paths[4]{};
         for(unsigned corner = 0; corner < 4; ++corner)
         {
@@ -81,9 +85,20 @@ struct PatchOpticalEvaluator
             const double length2 = second.cast<double>().dot(second.cast<double>());
             if(!(length2 > 0.0 && finite(length2))) return PatchOpticalFrameFailure;
             const TransverseFrame source_frame{vertex.basis_x, second.normalized()};
-            if(!PolarizationTransport::try_transport(
-                   vertex.direction_drop, source_frame, vertex.field,
-                   direction, target_frame, transported[corner])) return PatchOpticalFrameFailure;
+            if(second_input_fields)
+            {
+                const JonesResponse32 response{{vertex.field, second_input_fields[index]}};
+                JonesResponse32 target{};
+                if(!response.is_finite()) return PatchOpticalInvalidInput;
+                if(!PolarizationTransport::try_transport_response(
+                       vertex.direction_drop, source_frame, response,
+                       direction, target_frame, target)) return PatchOpticalFrameFailure;
+                transported[0][corner] = target.column[0];
+                transported[1][corner] = target.column[1];
+            }
+            else if(!PolarizationTransport::try_transport(
+                       vertex.direction_drop, source_frame, vertex.field,
+                       direction, target_frame, transported[0][corner])) return PatchOpticalFrameFailure;
             paths[corner] = vertex.optical_cycles;
         }
 
@@ -97,23 +112,26 @@ struct PatchOpticalEvaluator
         // Double interpolation/area scaling and accumulation; the existing
         // transport result and unit-phasor result are still FP32 by contract.
         const double amplitude = ::sqrt(area / omega);
-        const double sr = amplitude * bilinear(transported[0].x.real, transported[1].x.real,
-            transported[2].x.real, transported[3].x.real, hit.u, hit.v);
-        const double si = amplitude * bilinear(transported[0].x.imag, transported[1].x.imag,
-            transported[2].x.imag, transported[3].x.imag, hit.u, hit.v);
-        const double pr = amplitude * bilinear(transported[0].y.real, transported[1].y.real,
-            transported[2].y.real, transported[3].y.real, hit.u, hit.v);
-        const double pi = amplitude * bilinear(transported[0].y.imag, transported[1].y.imag,
-            transported[2].y.imag, transported[3].y.imag, hit.u, hit.v);
         const double c = static_cast<double>(phasor.real), s = static_cast<double>(phasor.imag);
         Contribution candidate{};
-        candidate.incoherent_s = ::fma(sr, sr, si * si);
-        candidate.incoherent_p = ::fma(pr, pr, pi * pi);
-        candidate.path_field = {
-            ::fma(sr, c, -si * s), ::fma(sr, s, si * c),
-            ::fma(pr, c, -pi * s), ::fma(pr, s, pi * c)};
+        for(unsigned j = 0; j < columns; ++j)
+        {
+            const auto* f = transported[j];
+            const double sr = amplitude * bilinear(f[0].x.real, f[1].x.real, f[2].x.real, f[3].x.real, hit.u, hit.v);
+            const double si = amplitude * bilinear(f[0].x.imag, f[1].x.imag, f[2].x.imag, f[3].x.imag, hit.u, hit.v);
+            const double pr = amplitude * bilinear(f[0].y.real, f[1].y.real, f[2].y.real, f[3].y.real, hit.u, hit.v);
+            const double pi = amplitude * bilinear(f[0].y.imag, f[1].y.imag, f[2].y.imag, f[3].y.imag, hit.u, hit.v);
+            // Input columns are statistically independent; output s/p are summed,
+            // not averaged. No propagation or focal phase enters incoherent.
+            candidate.incoherent_s += input_weight * ::fma(sr, sr, si * si);
+            candidate.incoherent_p += input_weight * ::fma(pr, pr, pi * pi);
+            auto& field = j == 0u ? candidate.path_field : candidate.path_field_second;
+            field = {::fma(sr, c, -si * s), ::fma(sr, s, si * c),
+                     ::fma(pr, c, -pi * s), ::fma(pr, s, pi * c)};
+        }
         if(!finite(candidate.incoherent_s) || !finite(candidate.incoherent_p)
-           || !finite_field(candidate.path_field)) return PatchOpticalArithmeticFailure;
+           || !finite_field(candidate.path_field) || !finite_field(candidate.path_field_second))
+            return PatchOpticalArithmeticFailure;
         output = candidate; // success-only update
         if(used_branch) *used_branch = branch;
         return PatchOpticalNone;
@@ -126,6 +144,9 @@ struct PatchOpticalEvaluator
         const FoldedPatchView folded = {}) noexcept
     {
         PatchOpticalResult result{};
+        const bool dual = input.input_polarization == IncidentPolarization::Unpolarized;
+        const unsigned columns = dual ? 2u : 1u;
+        const double input_weight = dual ? 0.5 : 1.0;
         // Companion output is invalid until the entire known-hit evaluation finishes.
         // Early error exits must never leave a seemingly valid zero focal result.
         if(focal_output)
@@ -134,6 +155,10 @@ struct PatchOpticalEvaluator
             focal_output->flags = FocalInputError;
             invalidate_focal(*focal_output);
         }
+        if((input.input_polarization != IncidentPolarization::SingleJones && !dual)
+           || (dual && (!input.second_input_fields || input.second_input_count != input.vertex_count))
+           || (!dual && (input.second_input_fields || input.second_input_count != 0u)))
+        { result.flags = PatchOpticalInvalidInput; invalidate(result); return result; }
         if(index >= input.direction_count || !input.directions || !input.offsets || !input.summaries)
         { result.flags = PatchOpticalInvalidInput; invalidate(result); return result; }
 
@@ -167,10 +192,10 @@ struct PatchOpticalEvaluator
         { result.flags |= PatchOpticalFrameFailure; result.rejected_hits = summary.hit_count;
           invalidate(result); return result; }
 
-        Sum sr{}, si{}, pr{}, pi{}, incoherent_s{}, incoherent_p{};
+        Sum sr[2]{}, si[2]{}, pr[2]{}, pi[2]{}, incoherent_s{}, incoherent_p{};
         const bool with_focal = focal_config && focal_output;
         FocalOpticalResult focal{};
-        Sum focal_sr{}, focal_si{}, focal_pr{}, focal_pi{}, family_envelope[4]{};
+        Sum focal_sr[2]{}, focal_si[2]{}, focal_pr[2]{}, focal_pi[2]{}, family_envelope[4]{};
         if(with_focal && !FocalPhase::layout_valid(*focal_config)) focal.flags |= FocalInvalidGeometry;
 
         std::uint32_t recorded_nonregular_hits = 0;
@@ -191,7 +216,7 @@ struct PatchOpticalEvaluator
                 recorded_nonregular_hits += patch.status == PatchCellStatus::NeedsRefinement;
                 flags = evaluate_patch(input.vertices, input.vertex_count, patch, hit,
                     input.directions[index], target_frame, contribution,
-                    folded.find(hit.compact_index), &used_branch);
+                    folded.find(hit.compact_index), &used_branch, input.second_input_fields);
             }
 
             if(flags != 0u)
@@ -205,8 +230,12 @@ struct PatchOpticalEvaluator
             }
             ++result.evaluated_hits;
             result.reserved += used_branch != nullptr; // ABI-retained folded-hit counter
-            sr.add(contribution.path_field.s_real); si.add(contribution.path_field.s_imag);
-            pr.add(contribution.path_field.p_real); pi.add(contribution.path_field.p_imag);
+            for(unsigned j = 0; j < columns; ++j)
+            {
+                const auto& f = j == 0u ? contribution.path_field : contribution.path_field_second;
+                sr[j].add(f.s_real); si[j].add(f.s_imag);
+                pr[j].add(f.p_real); pi[j].add(f.p_imag);
+            }
             incoherent_s.add(contribution.incoherent_s); incoherent_p.add(contribution.incoherent_p);
             if(with_focal)
             {
@@ -234,9 +263,13 @@ struct PatchOpticalEvaluator
                 }
                 else
                 {
-                    const auto f = FocalPhase::apply(contribution.path_field, estimate.quarter_turns);
-                    focal_sr.add(f.s_real); focal_si.add(f.s_imag);
-                    focal_pr.add(f.p_real); focal_pi.add(f.p_imag);
+                    for(unsigned j = 0; j < columns; ++j)
+                    {
+                        const auto& field = j == 0u ? contribution.path_field : contribution.path_field_second;
+                        const auto f = FocalPhase::apply(field, estimate.quarter_turns);
+                        focal_sr[j].add(f.s_real); focal_si[j].add(f.s_imag);
+                        focal_pr[j].add(f.p_real); focal_pi[j].add(f.p_imag);
+                    }
                     family_envelope[estimate.family].add(contribution.incoherent_s + contribution.incoherent_p);
                     ++focal.family_hits[estimate.family];
                     ++focal.corrected_hits;
@@ -252,12 +285,17 @@ struct PatchOpticalEvaluator
             if(recorded_nonregular_hits == 0u) result.flags |= PatchOpticalRefinementPending;
             if(recorded_nonregular_hits != summary.refinement_hits) result.flags |= PatchOpticalInvalidInput;
         }
-        result.regular_partial_path_field = {sr.value(), si.value(), pr.value(), pi.value()};
+        result.regular_partial_path_field = {sr[0].value(), si[0].value(), pr[0].value(), pi[0].value()};
+        result.regular_partial_path_field_second = {sr[1].value(), si[1].value(), pr[1].value(), pi[1].value()};
         result.regular_partial_incoherent_s = incoherent_s.value();
         result.regular_partial_incoherent_p = incoherent_p.value();
-        result.regular_partial_path_s = ::fma(sr.value(), sr.value(), si.value() * si.value());
-        result.regular_partial_path_p = ::fma(pr.value(), pr.value(), pi.value() * pi.value());
+        for(unsigned j = 0; j < columns; ++j)
+        {
+            result.regular_partial_path_s += input_weight * ::fma(sr[j].value(), sr[j].value(), si[j].value() * si[j].value());
+            result.regular_partial_path_p += input_weight * ::fma(pr[j].value(), pr[j].value(), pi[j].value() * pi[j].value());
+        }
         if(!finite_field(result.regular_partial_path_field)
+           || !finite_field(result.regular_partial_path_field_second)
            || !finite(result.regular_partial_incoherent_s) || !finite(result.regular_partial_incoherent_p)
            || !finite(result.regular_partial_path_s) || !finite(result.regular_partial_path_p))
             result.flags |= PatchOpticalArithmeticFailure;
@@ -268,12 +306,17 @@ struct PatchOpticalEvaluator
             if(result.flags & patch_optical_pending_mask) focal.flags |= FocalInputPending;
             if(result.first_problem_patch_id < focal.first_problem_patch_id)
                 focal.first_problem_patch_id = result.first_problem_patch_id;
-            focal.field = {focal_sr.value(), focal_si.value(), focal_pr.value(), focal_pi.value()};
-            focal.intensity_s = ::fma(focal.field.s_real, focal.field.s_real, focal.field.s_imag * focal.field.s_imag);
-            focal.intensity_p = ::fma(focal.field.p_real, focal.field.p_real, focal.field.p_imag * focal.field.p_imag);
+            focal.field = {focal_sr[0].value(), focal_si[0].value(), focal_pr[0].value(), focal_pi[0].value()};
+            focal.field_second = {focal_sr[1].value(), focal_si[1].value(), focal_pr[1].value(), focal_pi[1].value()};
+            for(unsigned j = 0; j < columns; ++j)
+            {
+                const auto& f = j == 0u ? focal.field : focal.field_second;
+                focal.intensity_s += input_weight * ::fma(f.s_real, f.s_real, f.s_imag * f.s_imag);
+                focal.intensity_p += input_weight * ::fma(f.p_real, f.p_real, f.p_imag * f.p_imag);
+            }
             for(unsigned f = 0; f < 4; ++f) focal.family_incoherent[f] = family_envelope[f].value();
-            if(!finite_field(focal.field) || !finite(focal.intensity_s + focal.intensity_p))
-                focal.flags |= FocalArithmeticError;
+            if(!finite_field(focal.field) || !finite_field(focal.field_second)
+               || !finite(focal.intensity_s + focal.intensity_p)) focal.flags |= FocalArithmeticError;
             // No complete-looking focal intensity assembled from only some hits.
             if(!focal.valid()) invalidate_focal(focal);
             *focal_output = focal;
@@ -285,6 +328,7 @@ private:
     HOST_DEVICE static void invalidate_focal(FocalOpticalResult& r) noexcept
     {
         r.field = {patch_optical_nan, patch_optical_nan, patch_optical_nan, patch_optical_nan};
+        r.field_second = r.field;
         r.intensity_s = r.intensity_p = patch_optical_nan;
     }
     // Neumaier compensated summation. No atomic operations; one thread owns
@@ -323,6 +367,7 @@ private:
     {
         result.regular_partial_path_field = {patch_optical_nan, patch_optical_nan,
                                              patch_optical_nan, patch_optical_nan};
+        result.regular_partial_path_field_second = result.regular_partial_path_field;
         result.regular_partial_incoherent_s = result.regular_partial_incoherent_p = patch_optical_nan;
         result.regular_partial_path_s = result.regular_partial_path_p = patch_optical_nan;
     }

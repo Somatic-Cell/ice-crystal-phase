@@ -31,16 +31,17 @@ void bounds(std::ostream& out,const std::array<PatchRegularityAudit::Bound,4>& x
     for(unsigned k=0;k<4;++k){if(k)out<<',';out<<'[';number(out,x[k].lo);out<<',';number(out,x[k].hi);out<<']';}
     out<<']';
 }
-void vertex(std::ostream& out,const OutgoingVertex& v,const std::uint32_t id)
+void vertex(std::ostream& out,const OutgoingVertex& v,const std::uint32_t id,const Field32* second)
 {
     out<<"{\"vertex_index\":"<<id<<",\"position_bits\":";vec_bits(out,v.position_drop);
     out<<",\"direction_bits\":";vec_bits(out,v.direction_drop);
     out<<",\"basis_x_bits\":";vec_bits(out,v.basis_x);
     out<<",\"field_bits\":";field_bits(out,v.field);
+    if(second) {out<<",\"second_input_field_bits\":";field_bits(out,*second);}
     out<<",\"turns\":"<<v.optical_cycles.turns<<",\"fraction_bits\":";bits(out,v.optical_cycles.fraction);
     out<<",\"status\":"<<static_cast<unsigned>(v.status)<<",\"diagnostics\":"<<v.diagnostics<<'}';
 }
-void inspect_patch(std::ostream& out,const FailedPatchWitness& w,const RaindropTraceConfig& config)
+void inspect_patch(std::ostream& out,const FailedPatchWitness& w,const RaindropTraceConfig& config,const bool dual)
 {
     const auto& p=w.patch;
     const auto nx=config.grid_width-1u,ny=config.grid_height-1u;
@@ -56,7 +57,7 @@ void inspect_patch(std::ostream& out,const FailedPatchWitness& w,const RaindropT
     out<<",\"vertices\":[";
     BilinearPatchGeometry g{};
     for(unsigned k=0;k<4;++k)
-    {if(k)out<<',';vertex(out,w.vertices[k],p.vertex_indices[k]);g.corners[k]=w.vertices[k].direction_drop;}
+    {if(k)out<<',';vertex(out,w.vertices[k],p.vertex_indices[k],dual?&w.second_input_fields[k]:nullptr);g.corners[k]=w.vertices[k].direction_drop;}
     const auto a=PatchRegularityAudit::inspect(g);
     out<<"],\"host_audit\":{\"finite_input\":"<<(a.finite_input?"true":"false")
        <<",\"orientation32\":"<<a.host_orientation32<<",\"interval_orientation64\":"<<a.interval_orientation64
@@ -79,6 +80,9 @@ void PatchFailureReport::write_json(const std::filesystem::path& path) const
 {
     const auto& s=snapshot_;
     const auto& c=s.config;
+    const bool dual=s.input_polarization==IncidentPolarization::Unpolarized;
+    if(!dual && s.input_polarization!=IncidentPolarization::SingleJones)
+        throw std::invalid_argument("Unknown incident-state representation.");
     if(c.grid_width<2 || c.grid_height<2 || s.theta_count==0 || s.phi_count==0)
         throw std::invalid_argument("Patch report requires nonempty valid grids.");
     std::map<std::uint32_t,const FailedPatchWitness*> patch_by_compact;
@@ -110,8 +114,9 @@ void PatchFailureReport::write_json(const std::filesystem::path& path) const
     out.imbue(std::locale::classic());out<<std::setprecision(std::numeric_limits<double>::max_digits10);
     const char* origin=s.origin==PatchWitnessOrigin::GpuCapture?"gpu_buffer_snapshot":
                        (s.origin==PatchWitnessOrigin::CpuRetrace?"cpu_retrace_NOT_gpu":"synthetic_test");
-    out<<"{\n\"format\":\"rainbow_patch_failure_witness_v1\",\n\"origin\":\""<<origin<<"\",\n"
-       <<"\"integration_baseline_commit\":\"8c8deabef6fb10717308491b1e992a266b46e3d0\",\n"
+    out<<"{\n\"format\":\""<<(dual?"rainbow_patch_failure_witness_v2":"rainbow_patch_failure_witness_v1")<<"\",\n\"origin\":\""<<origin<<"\",\n"
+       <<"\"integration_baseline_commit\":\"d1aacaf9c3e3130415ba32cbbfe6224aed965f7f\",\n"
+       <<"\"input_polarization\":\""<<(dual?"unpolarized":"single_jones")<<"\",\n"
        <<"\"changes_numerical_results\":false,\n"
        <<"\"float_encoding\":\"IEEE754_binary32_bits_as_uint32\",\n"
        <<"\"scope\":\"all_recorded_hits_of_failed_directions_plus_named_first_problem_patches\",\n"
@@ -125,7 +130,9 @@ void PatchFailureReport::write_json(const std::filesystem::path& path) const
     out<<",\"reference_distance_bits\":[";bits(out,c.reference_distance);out<<',';bits(out,c.outgoing_reference_distance);
     out<<"],\"incident_direction_bits\":";vec_bits(out,c.incident_direction);
     out<<",\"incident_basis_x_bits\":";vec_bits(out,c.incident_basis_x);
-    out<<",\"incident_field_bits\":";field_bits(out,c.incident_field);
+    if(dual) out<<",\"input_coherency\":[0.5,0,0,0.5],\"incident_total_intensity\":1"
+                <<",\"response_column_inputs\":[[1,0,0,0],[0,0,1,0]]";
+    else {out<<",\"incident_field_bits\":";field_bits(out,c.incident_field);}
     out<<",\"shape_coefficients_bits\":[";
     for(unsigned k=0;k<8;++k){if(k)out<<',';bits(out,c.shape.coefficients[k]);}
     out<<"],\"focal_offsets\":[";
@@ -143,7 +150,7 @@ void PatchFailureReport::write_json(const std::filesystem::path& path) const
        <<",\"underresolved_directions\":"<<s.underresolved_directions
        <<",\"gpu_read_bytes\":"<<s.gpu_read_bytes<<",\"gpu_read_calls\":"<<s.gpu_read_calls<<"},\n";
     out<<"\"patches\":[\n";
-    for(std::size_t i=0;i<s.patches.size();++i){if(i)out<<",\n";inspect_patch(out,s.patches[i],c);}
+    for(std::size_t i=0;i<s.patches.size();++i){if(i)out<<",\n";inspect_patch(out,s.patches[i],c,dual);}
     out<<"\n],\n\"directions\":[\n";
     constexpr double pi=3.141592653589793238462643383279502884;
     for(std::size_t i=0;i<s.directions.size();++i)
@@ -168,8 +175,10 @@ void PatchFailureReport::write_json(const std::filesystem::path& path) const
         out<<",\"diffraction_blend\":";number(out,df.blend);
         out<<",\"incoherent\":[";number(out,o.regular_partial_incoherent_s);out<<',';number(out,o.regular_partial_incoherent_p);
         out<<"],\"path_field\":";field(out,o.regular_partial_path_field);
+        if(dual) {out<<",\"path_field_second\":";field(out,o.regular_partial_path_field_second);}
         out<<",\"path_intensity\":[";number(out,o.regular_partial_path_s);out<<',';number(out,o.regular_partial_path_p);
         out<<"],\"focal_field\":";field(out,f.field);
+        if(dual) {out<<",\"focal_field_second\":";field(out,f.field_second);}
         out<<",\"focal_intensity\":[";number(out,f.intensity_s);out<<',';number(out,f.intensity_p);
         out<<"],\"diffraction_intensity\":[";number(out,df.intensity_s);out<<',';number(out,df.intensity_p);
         out<<"],\"hits\":[";

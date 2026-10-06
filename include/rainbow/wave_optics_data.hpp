@@ -5,7 +5,7 @@
 
 namespace rainbow
 {
-// Separate companion buffers: original path-only result/parameter ABI is intact.
+// Companion buffers. ABI v2 includes the second incident response column.
 struct FocalPhaseConfig
 {
     std::uint32_t grid_width = 0, grid_height = 0;
@@ -32,6 +32,9 @@ struct FocalOpticalResult
     std::uint32_t family_hits[4] = {};
     std::uint32_t corrected_hits = 0, extra_quarter_turn_hits = 0;
     std::uint32_t flags = 0, first_problem_patch_id = 0xffffffffu;
+    // field is input column 0; field_second is column 1. Intensities are the
+    // incoherent input-state average in unpolarized mode, not |field|^2 alone.
+    OpticalField64 field_second{};
     [[nodiscard]] HOST_DEVICE bool valid() const noexcept { return flags == 0u; }
 };
 struct WaveOpticsParams
@@ -92,8 +95,8 @@ struct WaveOpticsStatistics
     std::uint64_t corrected_hits = 0, extra_quarter_turn_hits = 0;
 };
 static_assert(sizeof(FocalPhaseConfig) == 32);
-static_assert(sizeof(FocalOpticalResult) == 112);
-static_assert(sizeof(WaveOpticsParams) == 144);
+static_assert(sizeof(FocalOpticalResult) == 144);
+static_assert(sizeof(WaveOpticsParams) == 160);
 static_assert(sizeof(DiffractionResult) == 40);
 static_assert(sizeof(DiffractionParams) == 64);
 static_assert(std::is_trivially_copyable_v<WaveOpticsParams>);

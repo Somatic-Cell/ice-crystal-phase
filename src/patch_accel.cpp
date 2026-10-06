@@ -1,4 +1,5 @@
 #include <rainbow/patch_accel.hpp>
+#include <rainbow/raindrop_tracer.hpp>
 #include <rainbow/cuda_error.hpp>
 #include <rainbow/optix_error.hpp>
 #include <optix_stubs.h>
@@ -44,6 +45,7 @@ void PatchAccel::clear_result()
     has_result_=false;
     traversable_=0;
     source_vertices_=0;
+    source_second_fields_=0;
     statistics_={};
     // Called only after completion of the owning stream. No per-buffer hidden
     // synchronizations are added to DeviceBuffer.
@@ -52,7 +54,13 @@ void PatchAccel::clear_result()
     statuses_.close(); block_offsets_.close(); block_summaries_.close();
 }
 
-void PatchAccel::build(const DeviceBuffer<OutgoingVertex>& vertices,const RaindropTraceConfig& config)
+void PatchAccel::build(const RaindropTracer& tracer)
+{
+    if(!tracer.has_result()) throw std::invalid_argument("Patch build requires a completed trace.");
+    build(tracer.vertices(), tracer.config(), tracer.is_unpolarized() ? &tracer.second_input_fields() : nullptr);
+}
+void PatchAccel::build(const DeviceBuffer<OutgoingVertex>& vertices,const RaindropTraceConfig& config,
+                      const DeviceBuffer<Field32>* second_input_fields)
 {
     if(is_closed_ || !module_.is_loaded()) throw std::logic_error("Load the patch module before build().");
     if(optix_context_.handle()==nullptr) throw std::logic_error("OptiX context is not live.");
@@ -61,12 +69,16 @@ void PatchAccel::build(const DeviceBuffer<OutgoingVertex>& vertices,const Raindr
         throw std::invalid_argument("Invalid patch grid or cell area.");
     if(vertices.element_count()!=std::size_t(next_layout.vertices_per_path)*4)
         throw std::invalid_argument("Patch source must contain all four path-major vertex grids.");
+    if(second_input_fields && (second_input_fields->element_count()!=vertices.element_count()
+                              || second_input_fields->address()==0))
+        throw std::invalid_argument("Unpolarized source needs a complete second response column.");
 
     cuda_context_.make_current();
     synchronize();
     clear_result();
     layout_=next_layout;
     source_vertices_=vertices.address();
+    source_second_fields_=second_input_fields ? second_input_fields->address() : 0;
     const unsigned int block_count=layout_.cell_count/patch_threads_per_block
         +(layout_.cell_count%patch_threads_per_block!=0?1u:0u);
     statuses_.allocate(layout_.cell_count);

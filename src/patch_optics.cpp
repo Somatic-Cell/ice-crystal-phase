@@ -29,6 +29,8 @@ void PatchOptics::load_module(const std::filesystem::path& fatbin_path)
 {
     if(is_closed_) throw std::logic_error("PatchOptics is closed.");
     module_.load_fatbin(fatbin_path);
+    // Refuse stale modules before using the v2 parameter/result layouts.
+    static_cast<void>(module_.find_function("rainbow_two_input_optics_abi_v2"));
     function_ = module_.find_function("evaluate_patch_optics");
 }
 void PatchOptics::synchronize()
@@ -103,6 +105,7 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
     host_results_.assign(n, PatchOpticalResult{});
     host_directions_ = query.host_directions();
     config_ = config;
+    result_unpolarized_ = source.is_unpolarized();
     has_grid_ = query.direction_grid() != nullptr;
     if(has_grid_) grid_ = *query.direction_grid();
     statistics_ = {};
@@ -130,6 +133,9 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
         params.direction_count = n;
         params.incident_direction = config.incident_direction;
         params.incident_basis_x = config.incident_basis_x;
+        params.input_polarization = result_unpolarized_ ? IncidentPolarization::Unpolarized : IncidentPolarization::SingleJones;
+        params.second_input_fields = reinterpret_cast<const Field32*>(source.source_second_fields_address());
+        params.second_input_count = result_unpolarized_ ? params.vertex_count : 0u;
         // The kernel takes one struct BY VALUE, not a pointer to host memory.
         constexpr unsigned int threads = 128;
         const unsigned int blocks = n / threads + (n % threads != 0u ? 1u : 0u);
@@ -264,6 +270,25 @@ void PatchOptics::collect_folded_statistics(bool with_focal)
         << ", max_estimated_relative_quadrature_error=" << folded_statistics_.largest_estimated_relative_error << '\n';
 }
 
+void PatchOptics::write_input_metadata(std::ostream& out) const
+{
+    if(result_unpolarized_)
+        out << "# input_states=unpolarized_two_orthogonal_unit_Jones_inputs\n"
+            << "# incident_polarization=unpolarized\n# incident_total_intensity=1\n"
+            << "# input_coherency=0.5,0,0,0.5\n"
+            << "# response_column_0_input=1,0,0,0\n# response_column_1_input=0,0,1,0\n"
+            << "# output_quantity=polarization_summed_response_to_unpolarized_input\n"
+            << "# output_polarization_is_not_assumed_unpolarized=true\n"
+            << "# response_columns_are_NOT_a_single_unpolarized_field=true\n"
+            << "# incoherent_input_average=half_sum_of_per_path_column_norms_squared\n"
+            << "# coherent_input_average=half_sum_of_norms_squared_of_columnwise_path_sums\n"
+            << "# diffraction_input=unpolarized_focal_intensities_before_transition_detection\n";
+    else
+        out << "# input_states=one_coherent_Jones_state\n"
+            << "# incident_field=" << config_.incident_field.x.real << ',' << config_.incident_field.x.imag
+            << ',' << config_.incident_field.y.real << ',' << config_.incident_field.y.imag << '\n';
+}
+
 void PatchOptics::write_folded_metadata(std::ostream& out) const
 {
     out << "# folded_patch_model=" << (result_used_folded_?"finite_branch_area_ratio_v1":"not_used")
@@ -306,11 +331,11 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
     if(!out) throw std::runtime_error("Cannot open optical CSV.");
     out.imbue(std::locale::classic());
     out << std::setprecision(std::numeric_limits<double>::max_digits10)
-        << "# format=rainbow_patch_optics_v1\n"
+        << "# format=" << (result_unpolarized_ ? "rainbow_patch_optics_v2" : "rainbow_patch_optics_v1") << '\n'
         << "# quantity=model_partial_angular_density_NOT_phase_function\n"
         << "# optical_complete=false\n# source_coverage_certified=false\n"
         << "# focal_line_phase_applied=false\n# diffraction_applied=false\n# normalized=false\n"
-        << "# input_states=one_coherent_Jones_state\n# phasor_convention=exp(+i*2*pi*q)\n"
+        << "# phasor_convention=exp(+i*2*pi*q)\n"
         << "# interpolation=transport_then_bilinear_field_and_path_then_propagation_phase\n"
         << "# transport=shortest_great_circle_minimum_rotation_explicit_project_convention\n"
         << "# field_components=s_perpendicular,p_outgoing_cross_s\n"
@@ -329,8 +354,8 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
         << "\n# outgoing_reference_distance_drop=" << config_.outgoing_reference_distance << '\n'
         << "# incident_direction=" << config_.incident_direction.x << ',' << config_.incident_direction.y << ',' << config_.incident_direction.z
         << "\n# incident_basis_x=" << config_.incident_basis_x.x << ',' << config_.incident_basis_x.y << ',' << config_.incident_basis_x.z
-        << "\n# incident_field=" << config_.incident_field.x.real << ',' << config_.incident_field.x.imag << ','
-        << config_.incident_field.y.real << ',' << config_.incident_field.y.imag << '\n';
+        << '\n';
+    write_input_metadata(out);
     write_folded_metadata(out);
     out << "# coefficients=";
     for(unsigned i = 0; i < 8; ++i) out << (i ? "," : "") << config_.shape.coefficients[i];
@@ -343,9 +368,12 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
     out << "direction_id,theta_index,phi_index,theta_rad,phi_rad,solid_angle_sr,wx,wy,wz,"
            "known_hits_complete,hit_count,evaluated_hits,rejected_hits,refinement_hits,boundary_hits,singular_hits,"
            "flags,query_flags,first_problem_patch_id,"
-           "regular_partial_incoherent_s,regular_partial_incoherent_p,regular_partial_incoherent_total,"
-           "regular_partial_path_s_real,regular_partial_path_s_imag,regular_partial_path_p_real,regular_partial_path_p_imag,"
-           "regular_partial_path_s,regular_partial_path_p,regular_partial_path_total\n";
+           "regular_partial_incoherent_s,regular_partial_incoherent_p,regular_partial_incoherent_total,";
+    if(result_unpolarized_) out << "path_J00_real,path_J00_imag,path_J10_real,path_J10_imag,";
+    else out << "regular_partial_path_s_real,regular_partial_path_s_imag,regular_partial_path_p_real,regular_partial_path_p_imag,";
+    out << "regular_partial_path_s,regular_partial_path_p,regular_partial_path_total";
+    if(result_unpolarized_) out << ",path_J01_real,path_J01_imag,path_J11_real,path_J11_imag";
+    out << '\n';
     for(std::size_t i = 0; i < host_results_.size(); ++i)
     {
         const auto& r = host_results_[i];
@@ -368,7 +396,13 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
             << r.regular_partial_incoherent_s + r.regular_partial_incoherent_p << ','
             << f.s_real << ',' << f.s_imag << ',' << f.p_real << ',' << f.p_imag << ','
             << r.regular_partial_path_s << ',' << r.regular_partial_path_p << ','
-            << r.regular_partial_path_s + r.regular_partial_path_p << '\n';
+            << r.regular_partial_path_s + r.regular_partial_path_p;
+        if(result_unpolarized_)
+        {
+            const auto& f1 = r.regular_partial_path_field_second;
+            out << ',' << f1.s_real << ',' << f1.s_imag << ',' << f1.p_real << ',' << f1.p_imag;
+        }
+        out << '\n';
     }
     out.flush();
     if(!out) throw std::runtime_error("Writing optical CSV failed.");
@@ -381,7 +415,7 @@ void PatchOptics::write_wave_csv(const std::filesystem::path& path) const
     if(!out) throw std::runtime_error("Cannot open wave-optics CSV.");
     out.imbue(std::locale::classic());
     out << std::setprecision(std::numeric_limits<double>::max_digits10)
-        << "# format=rainbow_wave_optics_v1\n"
+        << "# format=" << (result_unpolarized_ ? "rainbow_wave_optics_v2" : "rainbow_wave_optics_v1") << '\n'
         << "# quantity=model_angular_density_NOT_certified_phase_function\n"
         << "# optical_effects_connected=true\n# optical_complete=false\n# source_coverage_certified=false\n"
         << "# normalized=false\n# focal_line_phase_applied=true\n# diffraction_stage_executed=true\n"
@@ -416,9 +450,9 @@ void PatchOptics::write_wave_csv(const std::filesystem::path& path) const
         << "\n# outgoing_reference_distance_drop="<<config_.outgoing_reference_distance
         << "\n# incident_direction="<<config_.incident_direction.x<<','<<config_.incident_direction.y<<','<<config_.incident_direction.z
         << "\n# incident_basis_x="<<config_.incident_basis_x.x<<','<<config_.incident_basis_x.y<<','<<config_.incident_basis_x.z
-        << "\n# incident_field="<<config_.incident_field.x.real<<','<<config_.incident_field.x.imag<<','
-        <<config_.incident_field.y.real<<','<<config_.incident_field.y.imag
-        << "\n# coefficients=";
+        << '\n';
+    write_input_metadata(out);
+    out << "# coefficients=";
     for(unsigned f=0;f<8;++f)out<<(f?",":"")<<config_.shape.coefficients[f];
     out << '\n';
     write_folded_metadata(out);
@@ -435,9 +469,12 @@ void PatchOptics::write_wave_csv(const std::filesystem::path& path) const
         << "focal_valid,focal_flags,focal_corrected_hits,focal_extra_quarter_turn_hits,focal_first_problem_patch_id,"
         << "R_hits,TT_hits,TRT_hits,TRRT_hits,transition_flags,diffraction_valid,diffraction_flags,"
         << "diffraction_transition_kind,diffraction_sigma_rad,diffraction_blend,"
-        << "incoherent_s,incoherent_p,incoherent_total,path_s,path_p,path_total,"
-        << "focal_s_real,focal_s_imag,focal_p_real,focal_p_imag,focal_s,focal_p,focal_total,"
-        << "diffraction_s,diffraction_p,diffraction_total\n";
+        << "incoherent_s,incoherent_p,incoherent_total,path_s,path_p,path_total,";
+    if(result_unpolarized_) out << "focal_J00_real,focal_J00_imag,focal_J10_real,focal_J10_imag,";
+    else out << "focal_s_real,focal_s_imag,focal_p_real,focal_p_imag,";
+    out << "focal_s,focal_p,focal_total,diffraction_s,diffraction_p,diffraction_total";
+    if(result_unpolarized_) out << ",focal_J01_real,focal_J01_imag,focal_J11_real,focal_J11_imag";
+    out << '\n';
     for(std::size_t i=0;i<host_results_.size();++i)
     {
         const auto& r=host_results_[i];const auto& f=host_focal_[i];const auto& d=host_diffraction_[i];
@@ -455,7 +492,10 @@ void PatchOptics::write_wave_csv(const std::filesystem::path& path) const
            <<','<<r.regular_partial_path_s<<','<<r.regular_partial_path_p<<','<<r.regular_partial_path_s+r.regular_partial_path_p
            <<','<<f.field.s_real<<','<<f.field.s_imag<<','<<f.field.p_real<<','<<f.field.p_imag
            <<','<<f.intensity_s<<','<<f.intensity_p<<','<<f.intensity_s+f.intensity_p
-           <<','<<d.intensity_s<<','<<d.intensity_p<<','<<d.intensity_s+d.intensity_p<<'\n';
+           <<','<<d.intensity_s<<','<<d.intensity_p<<','<<d.intensity_s+d.intensity_p;
+        if(result_unpolarized_) out << ',' << f.field_second.s_real << ',' << f.field_second.s_imag
+                                   << ',' << f.field_second.p_real << ',' << f.field_second.p_imag;
+        out << '\n';
     }
     out.flush();if(!out)throw std::runtime_error("Writing wave-optics CSV failed.");
 }
