@@ -74,20 +74,20 @@ if not exist outputs mkdir outputs
 
 if not exist outputs\unpolarized_a1_g129 mkdir outputs\unpolarized_a1_g129
 
-build\Debug\rainbow_trace.exe ^
-    build\Debug\modules\raindrop_trace.optixir ^
+build\Release\rainbow_trace.exe ^
+    build\Release\modules\raindrop_trace.optixir ^
     outputs\unpolarized_a1_g129\vertices.csv ^
     --radius-mm 1.0 ^
     --wavelength-nm 700 ^
     --ior 1.3314 ^
-    --grid 129 ^
+    --grid 3001 ^
     --inclination-deg 20 ^
-    --patch-module build\Debug\modules\patch_build.fatbin ^
-    --query-module build\Debug\modules\patch_query.optixir ^
+    --patch-module build\Release\modules\patch_build.fatbin ^
+    --query-module build\Release\modules\patch_query.optixir ^
     --query-theta 900 ^
     --query-phi 1800 ^
     --query-csv outputs\unpolarized_a1_g129\queries.csv ^
-    --optics-module build\Debug\modules\patch_optics.fatbin ^
+    --optics-module build\Release\modules\patch_optics.fatbin ^
     --optics-csv outputs\unpolarized_a1_g129\optics.csv ^
     --wave-csv outputs\unpolarized_a1_g129\wave.csv ^
     --focal-offsets 0,0,0,0 ^

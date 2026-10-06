@@ -1,14 +1,8 @@
-@REM rmdir /S build
-@REM mkdir build
-@REM cd build
-@REM cmake -S .. -B . -DBUILD_TESTING=ON && ^
-@REM cmake --build . --config Debug && ^
-@REM ctest --test-dir . -C Debug --output-on-failure --no-tests=error
-@REM cd ..
-
-cmake -S . -B build -DBUILD_TESTING=ON && ^
-cmake --build build --config Debug --clean-first && ^
-ctest --test-dir build -C Debug --output-on-failure --no-tests=error
-
-.venv\Scripts\python.exe -m unittest discover ^
-    -s tests -p test_unpolarized_io.py -v
+@echo off
+setlocal
+cd /d "%~dp0"
+rem Build only. No clean build, no tests, no simulation, no visualization.
+cmake -S . -B build -DBUILD_TESTING=OFF -DRAINBOW_ENABLE_DIAGNOSTICS=OFF %*
+if errorlevel 1 exit /b %ERRORLEVEL%
+cmake --build build --config Release --target rainbow_trace
+exit /b %ERRORLEVEL%

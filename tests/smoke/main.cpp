@@ -8,7 +8,7 @@
 #include <windows.h>
 
 #include <rainbow/cuda_driver.hpp>
-#include <rainbow/optix.hpp>
+#include "optix.hpp"
 
 #include <cstdlib>
 #include <exception>

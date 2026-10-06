@@ -7,7 +7,7 @@
 #endif
 #endif
 
-#include <rainbow/optix.hpp>
+#include "optix.hpp"
 
 #include <rainbow/cuda_driver.hpp>
 #include <rainbow/trace_launch_params.hpp>

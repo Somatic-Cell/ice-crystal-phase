@@ -2,7 +2,15 @@
 #include <rainbow/patch_accel.hpp>
 #include <rainbow/patch_query.hpp>
 #include <rainbow/patch_optics.hpp>
+
+#ifndef RAINBOW_ENABLE_DIAGNOSTICS
+#define RAINBOW_ENABLE_DIAGNOSTICS 0
+#endif
+
+#if RAINBOW_ENABLE_DIAGNOSTICS
 #include <rainbow/patch_failure_report.hpp>
+#endif
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -80,8 +88,18 @@ struct TraceCommandLine
             {command.optics_module_path=std::filesystem::path(argv[i]);continue;}
             if(option=="--optics-csv")
             {command.optics_csv_path=std::filesystem::path(argv[i]);continue;}
-            if(option=="--patch-failure-report")
-            {command.patch_failure_report_path=std::filesystem::path(argv[i]);continue;}
+            if(option == "--patch-failure-report")
+            {
+            #if RAINBOW_ENABLE_DIAGNOSTICS
+                command.patch_failure_report_path =
+                    std::filesystem::path(argv[i]);
+                continue;
+            #else
+                throw std::invalid_argument(
+                    "Detailed reports are disabled. "
+                    "Rebuild with -DRAINBOW_ENABLE_DIAGNOSTICS=ON.");
+            #endif
+            }
             if(option=="--wave-csv")
             {command.wave_csv_path=std::filesystem::path(argv[i]);continue;}
             const std::string value=ascii(argv[i]);
@@ -286,6 +304,7 @@ template<class Char> int run(const int argc,Char* argv[])
                     else optics.evaluate_wave(patches,query,tracer.config(),command.wave_settings);
                     // Read-only capture BEFORE final CSV I/O and before owners close.
                     // The report does not alter any numerical output or error mask.
+#if RAINBOW_ENABLE_DIAGNOSTICS
                     if(!command.patch_failure_report_path.empty())
                     {
                         const auto report=rainbow::PatchFailureReport::capture(
@@ -296,6 +315,7 @@ template<class Char> int run(const int argc,Char* argv[])
                             <<", sparse_read_bytes="<<report.snapshot().gpu_read_bytes<<'\n';
                         std::cout<<"Saved "<<command.patch_failure_report_path<<" (read-only witnesses, NOT repaired values).\n";
                     }
+#endif
                     optics.write_csv(command.optics_csv_path);
                     bool wave_failed=false;
                     if(!command.wave_csv_path.empty())
