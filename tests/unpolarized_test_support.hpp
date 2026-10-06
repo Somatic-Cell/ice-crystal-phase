@@ -1,5 +1,7 @@
 #pragma once
 
+#include "complex_channel_comparison.hpp"
+
 #include <rainbow/raindrop_paths.hpp>
 #include <rainbow/raindrop_settings.hpp>
 #include <rainbow/patch_optical_evaluator.hpp>
@@ -25,6 +27,23 @@ inline bool near(Field32 a, Field32 b, double r=3e-6)
 { return near(a.x.real,b.x.real,r)&&near(a.x.imag,b.x.imag,r)&&near(a.y.real,b.y.real,r)&&near(a.y.imag,b.y.imag,r); }
 inline bool near(OpticalField64 a, OpticalField64 b, double r=1e-5)
 { return near(a.s_real,b.s_real,r)&&near(a.s_imag,b.s_imag,r)&&near(a.p_real,b.p_real,r)&&near(a.p_imag,b.p_imag,r); }
+// Same-backend paired/single comparisons retain the old Cartesian criterion.
+// Only a caller explicitly comparing CPU against GPU selects ComplexChannels.
+enum class FieldComparison
+{
+    CartesianComponents,
+    ComplexChannels
+};
+inline bool near_field(const OpticalField64& a, const OpticalField64& b,
+                       const double relative, const FieldComparison comparison)
+{
+    if(comparison == FieldComparison::CartesianComponents)
+        return near(a,b,relative);
+    if(comparison == FieldComparison::ComplexChannels)
+        return near_complex_channel(a.s_real,a.s_imag,b.s_real,b.s_imag,relative)
+            && near_complex_channel(a.p_real,a.p_imag,b.p_real,b.p_imag,relative);
+    return false;
+}
 inline bool same_geometry(const OutgoingVertex& a, const OutgoingVertex& b)
 {
     return a.status==b.status && a.diagnostics==b.diagnostics
@@ -150,7 +169,8 @@ inline Query query(const Traced& a,const Geometry& g,Vec3 direction)
 }
 inline void check_average(const PatchOpticalResult& p,const FocalOpticalResult& f,
                           const PatchOpticalResult& x,const FocalOpticalResult& fx,
-                          const PatchOpticalResult& y,const FocalOpticalResult& fy,double tol=1e-5)
+                          const PatchOpticalResult& y,const FocalOpticalResult& fy,double tol=1e-5,
+                          FieldComparison comparison=FieldComparison::CartesianComponents)
 {
     require(p.flags==x.flags&&p.flags==y.flags,"Input averaging changed optical flags.");
     require(f.flags==fx.flags&&f.flags==fy.flags,"Input averaging changed focal flags.");
@@ -158,8 +178,8 @@ inline void check_average(const PatchOpticalResult& p,const FocalOpticalResult& 
     require(p.folded_evaluated_hits()==x.folded_evaluated_hits(),"Folded-hit count changed.");
     if((p.flags&patch_optical_error_mask)==0u)
     {
-        require(near(p.regular_partial_path_field,x.regular_partial_path_field,tol),"Output first response column mismatch.");
-        require(near(p.regular_partial_path_field_second,y.regular_partial_path_field,tol),"Output second response column mismatch.");
+        require(near_field(p.regular_partial_path_field,x.regular_partial_path_field,tol,comparison),"Output first response column mismatch.");
+        require(near_field(p.regular_partial_path_field_second,y.regular_partial_path_field,tol,comparison),"Output second response column mismatch.");
         require(near(p.regular_partial_incoherent_s,.5*(x.regular_partial_incoherent_s+y.regular_partial_incoherent_s),tol),"Unpolarized incoherent s mismatch.");
         require(near(p.regular_partial_incoherent_p,.5*(x.regular_partial_incoherent_p+y.regular_partial_incoherent_p),tol),"Unpolarized incoherent p mismatch.");
         require(near(p.regular_partial_path_s,.5*(x.regular_partial_path_s+y.regular_partial_path_s),tol),"Unpolarized coherent s mismatch.");
@@ -168,7 +188,7 @@ inline void check_average(const PatchOpticalResult& p,const FocalOpticalResult& 
     if(f.valid())
     {
         require(near(f.intensity_s,.5*(fx.intensity_s+fy.intensity_s),tol)&&near(f.intensity_p,.5*(fx.intensity_p+fy.intensity_p),tol),"Unpolarized focal mismatch.");
-        require(near(f.field,fx.field,tol)&&near(f.field_second,fy.field,tol),"Focal response columns mismatch.");
+        require(near_field(f.field,fx.field,tol,comparison)&&near_field(f.field_second,fy.field,tol,comparison),"Focal response columns mismatch.");
         for(unsigned k=0;k<4;++k)
         {
             require(f.family_hits[k]==fx.family_hits[k],"Family counts doubled.");

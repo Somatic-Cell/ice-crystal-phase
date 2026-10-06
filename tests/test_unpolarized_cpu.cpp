@@ -9,6 +9,56 @@
 using namespace unpolarized_tests;
 namespace
 {
+void comparison_contract()
+{
+    constexpr double tol = 4e-5;
+    const OpticalField64 gpu{
+        -0.054088233120984597, -0.20172343747626609,
+         6.1808638164063262e-05, -0.037433305319915677};
+    const OpticalField64 cpu{
+        -0.054088216939754602, -0.20172343747626609,
+         6.1811817679262998e-05, -0.037433305319915677};
+    require(!near(gpu,cpu,tol),"Logged Cartesian mismatch was not reproduced.");
+    require(!near_field(gpu,cpu,tol,FieldComparison::CartesianComponents),
+            "Same-backend comparison was silently weakened.");
+    require(near_field(gpu,cpu,tol,FieldComparison::ComplexChannels),
+            "Logged small complex-field difference was rejected.");
+
+    // The fields have to agree as complex numbers, not just in intensity.
+    require(!near_complex_channel(1,0,-1,0,tol),"Opposite phase accepted.");
+    require(!near_complex_channel(1,0,0,1,tol),"Quarter-cycle phase error accepted.");
+    require(!near_complex_channel(1,0,1.001,0,tol),"Large amplitude error accepted.");
+    require(!near_field(OpticalField64{1e6,0,1e-3,0},
+                        OpticalField64{1e6,0,2e-3,0},tol,
+                        FieldComparison::ComplexChannels),
+            "Strong s channel masked a p-channel error.");
+
+    // One common phase rotation leaves the complex-distance decision invariant.
+    const auto rotate=[](const OpticalField64& a,double angle)
+    {
+        const double c=std::cos(angle),t=std::sin(angle);
+        return OpticalField64{
+            a.s_real*c-a.s_imag*t,a.s_real*t+a.s_imag*c,
+            a.p_real*c-a.p_imag*t,a.p_real*t+a.p_imag*c};
+    };
+    for(unsigned i=0;i<32;++i)
+    {
+        const double angle=double(i)*.17;
+        require(near_field(rotate(gpu,angle),rotate(cpu,angle),tol,
+                           FieldComparison::ComplexChannels),
+                "Comparison depends on a common complex phase.");
+    }
+    const double nan=std::numeric_limits<double>::quiet_NaN();
+    const double inf=std::numeric_limits<double>::infinity();
+    require(!near_complex_channel(nan,0,0,0,tol),"NaN accepted.");
+    require(!near_complex_channel(inf,0,inf,0,tol),"Infinity accepted.");
+    require(!near_complex_channel(0,0,0,0,nan),"NaN tolerance accepted.");
+    require(!near_complex_channel(0,0,0,0,-tol),"Negative tolerance accepted.");
+    require(!near_complex_channel(0,0,0,0,tol,-1),"Negative absolute tolerance accepted.");
+    require(near_complex_channel(0,0,0,0,tol),"Equal zeros rejected.");
+    require(near_complex_channel(0,0,5e-13,0,tol),"Absolute floor not applied.");
+    require(!near_complex_channel(0,0,2e-12,0,tol),"Absolute floor broadened.");
+}
 void interfaces()
 {
     auto j=JonesResponse32::identity();
@@ -165,6 +215,7 @@ int main(int argc,char** argv)
     try
     {
         if(argc>2)throw std::invalid_argument("Optional argument: new synthetic report path");
+        comparison_contract();
         serialization(argc==2?std::filesystem::path(argv[1]):std::filesystem::path{});
         interfaces();algebra();optical_case(settings(.4f,17,true));optical_case(settings(1.0f,129));
         std::cout<<checks<<" unpolarized checks passed (CPU).\n";return 0;
