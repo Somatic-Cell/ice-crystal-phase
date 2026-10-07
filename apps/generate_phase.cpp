@@ -6,6 +6,8 @@
 #include <rainbow/phase_cdf_math.hpp>
 #include <rainbow/npy_writer.hpp>
 #include <rainbow/folded_patch_data.hpp>
+#include <rainbow/rainbow_diffraction.hpp>
+#include <rainbow/water_refractive_index.hpp>
 
 #include <array>
 #include <charconv>
@@ -38,6 +40,14 @@ struct Command
     PhaseCdfPolicy policy{};
     PhaseStorageSettings storage{};
     double inclination_degrees=20;
+    enum class Material { Water, Constant };
+    Material material=Material::Water;
+    WaterOpticalState water{};
+    double temperature_celsius=20.0, pressure_pascal=101325.0;
+    double wavelength_requested_nm=0.0, constant_index=0.0;
+    bool wavelength_given=false, index_given=false, state_given=false;
+    bool has_paper_sigma=false;
+    double paper_primary_sigma_degrees=0.0;
     std::filesystem::path modules, output;
     std::uint32_t theta=360,phi=720;
     PhaseDensityStage stage=PhaseDensityStage::Diffraction;
@@ -83,15 +93,18 @@ template<class Char> Command parse(int argc,Char** argv)
         if(option=="--help")
         {
             std::cout << "rainbow_generate --out DIRECTORY [--modules DIRECTORY] [--sphere]\n"
-                         "  --radius-mm R --wavelength-nm L --ior N --grid VERTICES_PER_AXIS\n"
+                         "  --radius-mm R --wavelength-nm L (required, vacuum nm) --grid VERTICES_PER_AXIS\n"
                          "  --inclination-deg A --query-theta T --query-phi P\n"
                          "  --stage diffraction|focal|incoherent|path\n"
-                         "  --diffraction-sigma-deg S --focal-offsets 0,0,0,0\n"
+                         "  --material water (default) --temperature-c T --pressure-pa P\n"
+                         "  --material constant --ior N (explicit nondispersive reference)\n"
+                         "  --focal-offsets 0,0,0,0\n"
+                         "  diffraction width: Table II radius lookup, secondary = 2*primary\n"
                          "  --allow-underresolved  (explicitly accept flagged angular underresolution)\n"
                          "  --cdf-max-l1 E --cdf-max-lost-mass E --device ORDINAL\n"
                          "  --cdf-theta T --cdf-phi P (integer divisors of query dimensions)\n"
-                         "  --storage-gaussian-sigma-deg S (0: no additional blur; default 0)\n"
-                         "  --storage-gaussian-support S (default 4) --max-coarsening-tv E\n";
+                         "  --max-coarsening-tv E (quality policy, not a blur width)\n"
+                         "  No additional/global storage Gaussian is applied.\n";
             return {};
         }
         if(++i>=argc) throw std::invalid_argument("Missing option value.");
@@ -99,18 +112,38 @@ template<class Char> Command parse(int argc,Char** argv)
         if(option=="--modules") {c.modules=std::filesystem::path(argv[i]);continue;}
         const auto value=std::filesystem::path(argv[i]).string();
         if(option=="--radius-mm") c.settings.radius_mm=static_cast<float>(number(value));
-        else if(option=="--wavelength-nm") c.settings.wavelength_nm=static_cast<float>(number(value));
-        else if(option=="--ior") c.settings.interior_index=static_cast<float>(number(value));
+        else if(option=="--wavelength-nm")
+        {
+            if(c.wavelength_given)throw std::invalid_argument("Duplicate --wavelength-nm.");
+            c.wavelength_requested_nm=number(value);c.wavelength_given=true;
+            if(!(c.wavelength_requested_nm>0 && c.wavelength_requested_nm<=(std::numeric_limits<float>::max)()))
+                throw std::invalid_argument("Wavelength must be positive and representable by the solver.");
+            c.settings.wavelength_nm=static_cast<float>(c.wavelength_requested_nm);
+            if(!(c.settings.wavelength_nm>0))throw std::invalid_argument("Wavelength underflows solver precision.");
+        }
+        else if(option=="--material")
+        {
+            if(value=="water")c.material=Command::Material::Water;
+            else if(value=="constant")c.material=Command::Material::Constant;
+            else throw std::invalid_argument("Material must be water or constant.");
+        }
+        else if(option=="--temperature-c") {c.temperature_celsius=number(value);c.state_given=true;}
+        else if(option=="--pressure-pa") {c.pressure_pascal=number(value);c.state_given=true;}
+        else if(option=="--ior")
+        {
+            c.constant_index=number(value);c.index_given=true;
+        }
         else if(option=="--grid") c.settings.grid_width=c.settings.grid_height=positive_integer(value);
         else if(option=="--query-theta") c.theta=positive_integer(value);
         else if(option=="--query-phi") c.phi=positive_integer(value);
         else if(option=="--inclination-deg") c.inclination_degrees=number(value);
         else if(option=="--cdf-theta") c.storage.theta_count=positive_integer(value);
         else if(option=="--cdf-phi") c.storage.phi_count=positive_integer(value);
-        else if(option=="--storage-gaussian-sigma-deg") c.storage.gaussian_sigma_degrees=number(value);
-        else if(option=="--storage-gaussian-support") c.storage.gaussian_support_sigma=number(value);
+        else if(option=="--storage-gaussian-sigma-deg" || option=="--storage-gaussian-support")
+            throw std::invalid_argument("Global storage blur has been removed from rainbow_generate. Remove this option; only local Table-II diffraction and cell-mass aggregation are applied.");
         else if(option=="--max-coarsening-tv") c.storage.maximum_coarsening_tv=number(value);
-        else if(option=="--diffraction-sigma-deg") c.wave.primary_sigma_degrees=number(value);
+        else if(option=="--diffraction-sigma-deg")
+            throw std::invalid_argument("Manual diffraction width is not supported by rainbow_generate. Remove this option; Table II is selected automatically.");
         else if(option=="--transition-contrast") c.wave.transition_contrast=number(value);
         else if(option=="--cdf-max-l1") c.policy.maximum_l1_error=number(value);
         else if(option=="--cdf-max-lost-mass") c.policy.maximum_lost_mass=number(value);
@@ -148,20 +181,38 @@ template<class Char> Command parse(int argc,Char** argv)
         else throw std::invalid_argument("Unknown option: "+option);
     }
     if(c.output.empty()) throw std::invalid_argument("--out is required.");
+    if(!c.wavelength_given)throw std::invalid_argument("--wavelength-nm is required; there is no implicit wavelength.");
+    if(c.material==Command::Material::Water)
+    {
+        if(c.index_given)throw std::invalid_argument("Do not specify --ior for water. It is evaluated from wavelength and state; use --material constant only for explicit reference calculations.");
+        // Evaluate at the wavelength actually represented by the existing solver.
+        c.water=evaluate_water_optics(double(c.settings.wavelength_nm),c.temperature_celsius,c.pressure_pascal);
+        c.settings.interior_index=static_cast<float>(c.water.refractive_index);
+    }
+    else
+    {
+        if(!c.index_given || !(c.constant_index>0 && c.constant_index<=(std::numeric_limits<float>::max)()))
+            throw std::invalid_argument("Constant material requires a finite positive --ior.");
+        if(c.state_given)throw std::invalid_argument("Temperature/pressure do not define a constant-index material.");
+        c.settings.interior_index=static_cast<float>(c.constant_index);
+        if(!(c.settings.interior_index>0))throw std::invalid_argument("Index underflows solver precision.");
+    }
+    // Absolute indices + vacuum wavelength; no unannounced conversion to air-relative n.
+    // RaindropSettings::make_config() already fixes the exterior index to 1.
+    c.wave.primary_sigma_degrees=0.0; // Existing solver resolves Table II.
+    c.storage.gaussian_sigma_degrees=0.0; // NO second/global application of Table II.
+    c.storage.gaussian_support_sigma=4.0; // Inactive legacy library field.
+    c.has_paper_sigma=c.stage==PhaseDensityStage::Focal || c.stage==PhaseDensityStage::Diffraction;
+    if(c.has_paper_sigma && !RainbowDiffraction::table_sigma_degrees(c.settings.radius_mm,c.paper_primary_sigma_degrees))
+        throw std::invalid_argument("Table II covers radius 0.1..1.0 mm only. No bandwidth extrapolation is performed. The existing focal path also computes diffraction; use incoherent/path for out-of-table reference runs.");
     const double angle=c.inclination_degrees*phase_cdf_pi/180.0;
     if(c.storage.theta_count==0)c.storage.theta_count=c.theta;
     if(c.storage.phi_count==0)c.storage.phi_count=c.phi;
     if(c.storage.theta_count>c.theta || c.storage.phi_count>c.phi ||
        c.theta%c.storage.theta_count || c.phi%c.storage.phi_count)
         throw std::invalid_argument("CDF dimensions must divide the query dimensions without upsampling.");
-    const double sigma=c.storage.gaussian_sigma_degrees;
-    if(!(sigma>=0 && c.storage.gaussian_support_sigma>=2 && c.storage.gaussian_support_sigma<=8
-        && sigma*c.storage.gaussian_support_sigma<180
-        && c.storage.maximum_coarsening_tv>=0 && c.storage.maximum_coarsening_tv<=1))
-        throw std::invalid_argument("Invalid storage filter / coarsening error settings.");
-    if(sigma>0 && !c.policy.allow_underresolved &&
-       (180.0/double(c.theta)>0.5*sigma || 360.0/double(c.phi)>0.5*sigma))
-        throw std::invalid_argument("QUERY grid is too coarse for storage Gaussian (criterion h<=sigma/2); explicit --allow-underresolved is required for a preview.");
+    if(!(c.storage.maximum_coarsening_tv>=0 && c.storage.maximum_coarsening_tv<=1))
+        throw std::invalid_argument("Coarsening TV limit must lie in [0,1].");
     c.settings.incident_direction={static_cast<float>(std::cos(angle)),static_cast<float>(-std::sin(angle)),0};
     static_cast<void>(c.settings.make_config());
     if(std::filesystem::exists(c.output)) throw std::runtime_error("Output already exists.");
@@ -191,7 +242,43 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
     const double d=dot(e,k);for(unsigned i=0;i<3;++i)e[i]-=d*k[i];e=normalized(e);
     const D3 f{k[1]*e[2]-k[2]*e[1],k[2]*e[0]-k[0]*e[2],k[0]*e[1]-k[1]*e[0]};
     const FoldedPatchConfig folded{};
-    out << "{\n  \"schema\": \"rainbow.phase_cdf.numpy.v2\",\n  \"complete\": true,\n"
+    out << "{\n  \"material\": {\n";
+    out << "    \"model\": \"" << (c.material==Command::Material::Water?"water_iapws_r9_97":"constant") << "\",\n"
+        << "    \"wavelength_convention\": \"vacuum_nm\",\n"
+        << "    \"wavelength_requested_nm\": " << c.wavelength_requested_nm << ",\n"
+        << "    \"wavelength_evaluated_nm\": " << config.wavelength_nm << ",\n"
+        << "    \"ambient_model\": \"unit_absolute_index_air_approximation\",\n"
+        << "    \"absorption_model\": \"ignored_k_equals_zero\",\n"
+        << "    \"interior_index_evaluated_fp64\": " << (c.material==Command::Material::Water?c.water.refractive_index:c.constant_index) << ",\n"
+        << "    \"interior_index_solver_fp32\": " << config.interior_index << ",\n"
+        << "    \"exterior_index_solver\": " << config.exterior_index;
+    if(c.material==Command::Material::Water)
+        out << ",\n    \"refractive_index_release\": \"IAPWS R9-97\",\n"
+            << "    \"density_model\": \"IAPWS R6-95(2018) liquid pressure EOS inversion\",\n"
+            << "    \"temperature_kelvin\": " << c.water.temperature_kelvin << ",\n"
+            << "    \"pressure_pascal\": " << c.water.pressure_pascal << ",\n"
+            << "    \"density_kg_m3\": " << c.water.density_kg_m3 << ",\n"
+            << "    \"density_pressure_residual_pascal\": " << c.water.density_pressure_residual_pascal << ",\n"
+            << "    \"density_bracket_width_kg_m3\": " << c.water.density_bracket_width_kg_m3;
+    out << "\n  },\n  \"diffraction_policy\": {\n"
+        << "    \"name\": \"Sadeghi2012_TableII_local_v1\",\n"
+        << "    \"computed\": " << (c.has_paper_sigma?"true":"false") << ",\n"
+        << "    \"selected_output_includes_diffraction\": " << (c.stage==PhaseDensityStage::Diffraction?"true":"false") << ",\n"
+        << "    \"primary_sigma_degrees\": ";
+    if(c.has_paper_sigma)out<<c.paper_primary_sigma_degrees;else out<<"null";
+    out << ",\n    \"secondary_sigma_degrees\": ";
+    if(c.has_paper_sigma)out<<2*c.paper_primary_sigma_degrees;else out<<"null";
+    out << ",\n"
+        << "    \"bandwidth_source\": \"paper Table II; secondary sigma x2\",\n"
+        << "    \"between_table_radii\": \"linear interpolation (project convention)\",\n"
+        << "    \"outside_table_radii\": \"reject\",\n"
+        << "    \"wavelength_scaling\": \"none; no rule specified in Table II\",\n"
+        << "    \"support_sigma\": 4,\n"
+        << "    \"support_and_transition_detection_are_project_conventions\": true,\n"
+        << "    \"physical_sigma_depends_on_grid\": false,\n"
+        << "    \"query_dtheta_degrees\": " << 180.0/c.theta << ",\n"
+        << "    \"query_dphi_degrees\": " << 360.0/c.phi << "\n  },\n";
+    out << "  \"schema\": \"rainbow.phase_cdf.numpy.v2\",\n  \"complete\": true,\n"
         << "  \"dtype\": \"<f8\",\n  \"order\": \"C\",\n"
         << "  \"theta_count\": "<<cdf.theta_count()<<",\n  \"phi_count\": "<<cdf.phi_count()<<",\n"
         << "  \"density_measure\": \"solid_angle_sr\",\n"
@@ -229,7 +316,7 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
        <<"  \"folded_relative_tolerance\": "<<folded.relative_tolerance<<",\n"
        <<"  \"source_commit\": \""<<RAINBOW_SOURCE_COMMIT<<"\",\n"
        <<"  \"source_dirty_at_configure\": "<<(RAINBOW_SOURCE_DIRTY?"true":"false")<<",\n"
-       <<"  \"generator_version\": \"numpy_cdf_storage_v2\",\n"
+       <<"  \"generator_version\": \"numpy_cdf_water_policy_v1\",\n"
        <<"  \"quality\": {\n    \"source_coverage_certified\": false,\n"
        <<"    \"angular_convergence_certified\": false,\n"
        <<"    \"missing_source_cells\": "<<patches.statistics().count(PatchCellStatus::MissingCorners)<<",\n"
@@ -271,6 +358,16 @@ template<class Char> int run(int argc,Char** argv)
 {
     const auto c=parse(argc,argv);
     if(c.output.empty())return 0;
+    std::cout<<std::setprecision(17)
+        <<"Material="<<(c.material==Command::Material::Water?"water_iapws_r9_97":"constant")
+        <<" wavelength_vacuum_nm="<<c.settings.wavelength_nm
+        <<" interior_index_solver="<<c.settings.interior_index
+        <<" exterior_index=1; additional_storage_gaussian=none\n";
+    if(c.has_paper_sigma)
+        std::cout<<"Local diffraction sigma_primary_deg="<<c.paper_primary_sigma_degrees
+            <<" sigma_secondary_deg="<<2*c.paper_primary_sigma_degrees
+            <<" query_step_theta_deg="<<180.0/c.theta<<" query_step_phi_deg="<<360.0/c.phi
+            <<" (phi arc step additionally varies with theta)\n";
     const auto start=std::chrono::steady_clock::now();
     CudaContext context(c.device);
     RaindropTracer tracer(context);

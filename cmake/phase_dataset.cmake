@@ -104,3 +104,24 @@ if(BUILD_TESTING)
         endif()
     endif()
 endif()
+
+target_sources(rainbow_generate PRIVATE
+    "${PROJECT_SOURCE_DIR}/src/water_refractive_index.cpp")
+
+if(BUILD_TESTING)
+    add_executable(rainbow_water_optics_cpu_tests
+        "${PROJECT_SOURCE_DIR}/tests/test_water_optics_cpu.cpp"
+        "${PROJECT_SOURCE_DIR}/src/water_refractive_index.cpp")
+
+    target_include_directories(rainbow_water_optics_cpu_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/include")
+    target_compile_features(rainbow_water_optics_cpu_tests PRIVATE cxx_std_20)
+    rainbow_configure_host(rainbow_water_optics_cpu_tests)
+
+    add_test(
+        NAME rainbow_water_optics_cpu
+        COMMAND rainbow_water_optics_cpu_tests)
+    set_tests_properties(
+        rainbow_water_optics_cpu
+        PROPERTIES LABELS "cpu;material")
+endif()
