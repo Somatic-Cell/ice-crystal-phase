@@ -1,0 +1,10 @@
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/Experimental.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/Nightly.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/Continuous.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/NightlyMemoryCheck.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/ice_hex_trace_core.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/ice_trace_hex_cpu.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/ice_hex_host_tests.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/RUN_TESTS.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/ALL_BUILD.dir
+C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/CMakeFiles/ZERO_CHECK.dir

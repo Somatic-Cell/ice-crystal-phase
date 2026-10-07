@@ -1,0 +1,2022 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0b6e9a407ed1216569e93727399d02cb16e28f6a..ff8646fb9b309a7aa85926cb0fd5ecf7dd2b6353 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -167,3 +167,8 @@ message(STATUS "Rainbow: BUILD_TESTING=${BUILD_TESTING}")
+ message(STATUS "Rainbow: detailed diagnostics=${RAINBOW_ENABLE_DIAGNOSTICS}")
+ message(STATUS "Rainbow: current executable=rainbow_trace (reference/CSV CLI)")
+ 
++# Independent hexagonal-prism backend; keep the rain-drop solver unchanged.
++option(ICE_BUILD_HEX_TRACE "Build the additive hexagonal-prism tracer" ON)
++if(ICE_BUILD_HEX_TRACE)
++    add_subdirectory(hex_trace)
++endif()
+diff --git a/hex_trace/CMakeLists.txt b/hex_trace/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d48eafbf6a46c071650a65cb4cd01e28595e9b0
+--- /dev/null
++++ b/hex_trace/CMakeLists.txt
+@@ -0,0 +1,101 @@
++cmake_minimum_required(VERSION 3.27)
++
++# Also usable as a standalone build: -S hex_trace. CPU-only is an EXPLICIT
++# reference/test build; a failed CUDA build or launch never selects it implicitly.
++if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
++    project(IceHexTrace LANGUAGES CXX)
++    include(CTest)
++endif()
++option(ICE_HEX_ENABLE_CUDA "Build the CUDA Driver-API hex tracer" ON)
++option(ICE_HEX_BUILD_TESTS "Build hex tracer host and optional CUDA regression tests" ${BUILD_TESTING})
++set(ICE_HEX_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
++get_filename_component(ICE_REPOSITORY_ROOT "${ICE_HEX_ROOT}/.." ABSOLUTE)
++
++function(ice_hex_configure target)
++    target_compile_features(${target} PUBLIC cxx_std_20)
++    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
++    target_include_directories(${target} PUBLIC "${ICE_HEX_ROOT}/include")
++    if(WIN32)
++        target_compile_definitions(${target} PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
++    endif()
++    if(MSVC)
++        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/utf-8;/W4;/Zc:__cplusplus;/fp:precise>")
++    else()
++        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-fno-fast-math;-ffp-contract=off>")
++    endif()
++endfunction()
++
++add_library(ice_hex_trace_core STATIC src/hex_trace.cpp)
++ice_hex_configure(ice_hex_trace_core)
++add_executable(ice_trace_hex_cpu apps/trace_hex.cpp)
++target_link_libraries(ice_trace_hex_cpu PRIVATE ice_hex_trace_core)
++ice_hex_configure(ice_trace_hex_cpu)
++
++if(ICE_HEX_ENABLE_CUDA)
++    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
++        set(CMAKE_CUDA_ARCHITECTURES 86 CACHE STRING "CUDA architectures")
++    endif()
++    enable_language(CUDA)
++    find_package(CUDAToolkit 13.0 REQUIRED)
++    # Reuse the existing Driver-API owners without changing their source.
++    if(TARGET rainbow_drop_trace_host)
++        set(ice_hex_driver_target rainbow_drop_trace_host)
++    else()
++        add_library(ice_hex_driver STATIC
++            "${ICE_REPOSITORY_ROOT}/src/cuda_driver.cpp"
++            "${ICE_REPOSITORY_ROOT}/src/cuda_module.cpp"
++            "${ICE_REPOSITORY_ROOT}/src/cuda_error.cpp"
++            "${ICE_REPOSITORY_ROOT}/src/read_binary_file.cpp")
++        target_include_directories(ice_hex_driver PUBLIC "${ICE_REPOSITORY_ROOT}/include")
++        target_link_libraries(ice_hex_driver PUBLIC CUDA::cuda_driver)
++        ice_hex_configure(ice_hex_driver)
++        set(ice_hex_driver_target ice_hex_driver)
++    endif()
++    add_library(ice_hex_trace_cuda STATIC src/hex_trace_cuda.cpp)
++    target_link_libraries(ice_hex_trace_cuda PUBLIC ice_hex_trace_core ${ice_hex_driver_target})
++    ice_hex_configure(ice_hex_trace_cuda)
++    add_library(ice_hex_trace_module OBJECT device/hex_trace.cu)
++    target_include_directories(ice_hex_trace_module PRIVATE "${ICE_HEX_ROOT}/include")
++    set_target_properties(ice_hex_trace_module PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON
++        CUDA_EXTENSIONS OFF CUDA_FATBIN_COMPILATION ON CUDA_SEPARABLE_COMPILATION OFF CUDA_RUNTIME_LIBRARY None)
++    target_compile_options(ice_hex_trace_module PRIVATE
++        "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--ftz=false;--prec-div=true;--prec-sqrt=true;--fmad=false>")
++    if(MSVC)
++        target_compile_options(ice_hex_trace_module PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
++    endif()
++    function(ice_hex_stage executable)
++        add_custom_target(${executable}_stage
++            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:${executable}>/modules"
++            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_OBJECTS:ice_hex_trace_module>"
++                "$<TARGET_FILE_DIR:${executable}>/modules/hex_trace.fatbin"
++            COMMAND_EXPAND_LISTS VERBATIM)
++        add_dependencies(${executable}_stage ice_hex_trace_module)
++        add_dependencies(${executable} ${executable}_stage)
++    endfunction()
++    add_executable(ice_trace_hex apps/trace_hex.cpp)
++    target_compile_definitions(ice_trace_hex PRIVATE ICE_HEX_HAS_CUDA=1)
++    target_link_libraries(ice_trace_hex PRIVATE ice_hex_trace_cuda)
++    ice_hex_configure(ice_trace_hex)
++    ice_hex_stage(ice_trace_hex)
++endif()
++
++if(ICE_HEX_BUILD_TESTS)
++    enable_testing()
++    add_executable(ice_hex_host_tests tests/hex_trace_tests.cpp)
++    target_link_libraries(ice_hex_host_tests PRIVATE ice_hex_trace_core)
++    ice_hex_configure(ice_hex_host_tests)
++    add_test(NAME ice_hex_host COMMAND ice_hex_host_tests)
++    find_package(Python3 COMPONENTS Interpreter QUIET)
++    if(Python3_Interpreter_FOUND)
++        add_test(NAME ice_hex_cli COMMAND "${Python3_EXECUTABLE}"
++            "${ICE_HEX_ROOT}/tests/cli_test.py" "$<TARGET_FILE:ice_trace_hex_cpu>")
++    endif()
++    if(ICE_HEX_ENABLE_CUDA)
++        add_executable(ice_hex_cuda_tests tests/hex_trace_cuda_tests.cpp)
++        target_link_libraries(ice_hex_cuda_tests PRIVATE ice_hex_trace_cuda)
++        ice_hex_configure(ice_hex_cuda_tests)
++        ice_hex_stage(ice_hex_cuda_tests)
++        add_test(NAME ice_hex_cuda COMMAND ice_hex_cuda_tests)
++        # No "success" or skip when CUDA is missing. Tests are opt-in at build time.
++    endif()
++endif()
+diff --git a/hex_trace/README.md b/hex_trace/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..07537ddff7fea1d4ff3094c3713a96e59ff6c913
+--- /dev/null
++++ b/hex_trace/README.md
+@@ -0,0 +1,212 @@
++# 六角柱トレーサ M1
++
++対象基準: `Somatic-Cell/ice-crystal-phase` の
++`a9538941dcb9df2de6a4130fa66f625f0133c949`。
++
++## 範囲と未検証事項
++
++この差分は、**固定配向の正六角柱に対する、偏光を保持した幾何光学トレーサ**です。
++交差判定、投影面積、投影領域一様の入射点、反射・屈折・全反射、出射点群、
++各入射レイの光束監査を実装しています。CPU と CUDA の追跡コアは同じ FP64 コードです。
++**CUDA ホスト側とカーネルも実装を含みますが、提供環境に Toolkit/GPU がないため、
++CUDA コンパイル・実行および Windows/MSVC は未検証です。CPU テストの合格を GPU の合格とはしません。**
++CPU 専用ビルドは明示的な参照・検証経路です。CUDA の失敗で自動的に CPU へ切り替えません。
++
++配向平均、球面セル集計、CDF 接続、氷の分散データの読み込みはこの M1 の範囲外です。
++`phase_cdf.*`、既存 NPY 形式、既存 `PhaseRecord`、雨滴の数値実装は変更していません。
++M1 の CSV は診断・レビュー用です。将来の本生成処理が CSV を経由する設計ではありません。
++本段階だけで NF 用の完成した参照位相関数を出力するものではありません。
++
++採用モデルは非吸収・非磁性・等方誘電体・理想平面です。複屈折、粗面、回折、
++異なる光路間の干渉は含みません。全反射の s/p 相対位相は偏光状態に影響するため保持します。
++単一光路の全成分に共通する伝播位相は、経路間で振幅合成しないので計算しません。
++`--ior` は指定波長で呼び出し側が評価した実屈折率であり、既定値はありません。
++`--wavelength-nm` は必須ラベルですが、この段階で氷の光学定数を自動評価する機能はありません。
++例の `--ior 1.31` は数値検証条件です。氷の分散を実装済みと主張する値ではありません。
++
++## ファイルと読む順番
++
++1. `include/ice_crystal/hex_prism.hpp`: 形状、投影面積、入射点、半空間交差。
++2. `include/ice_crystal/flux_interface.hpp`: FP64 の光束用 Fresnel/Jones 応答。
++3. `include/ice_crystal/hex_trace_core.hpp`: 分岐追跡、終了条件、出射レコード、監査。
++4. `src/hex_trace.cpp`: ホスト検証、CPU バッチ、集計。
++5. `device/hex_trace.cu` / `src/hex_trace_cuda.cpp`: CUDA の count → prefix → replay/write。
++6. `apps/trace_hex.cpp`: バッチ実行、診断出力、失敗時の `.part` 保持。
++
++幾何・光学のヘッダ内実装は CPU/CUDA で同じ数式をコンパイルするためです。
++ホスト処理、所有権、I/O は `.cpp` に分離しています。
++FP64 の型と関数は `iceCrystal` 名前空間に追加しました。
++既存の FP32 `DielectricInterface` / `JonesResponse32` の意味や精度を変更していません。
++既存の `CudaContext`, `CudaModule`, `DeviceBuffer` を GPU の所有権管理に利用します。
++
++## 形状・座標
++
++中心原点、右手系、柱軸 `+y`。`R=circumradius_mm` は外接円半径、
++`L=length_mm` は全長です。雨滴の等体積球半径とは異なります。
++
++- 側面 0..5: 法線 `(cos(j*pi/3),0,sin(j*pi/3))`、平面距離 `sqrt(3)*R/2`。
++- 面 6: `+y` の底面。面 7: `-y` の底面。
++- 底面頂点角は `pi/6 + j*pi/3`。面0の正面は `+x`、頂点方向とは30度違います。
++- `ki` と `ko` は光の実際の進行方向。方向は `make_trace_settings()` で明示的に正規化。
++- `Frame` は `e1 = cross(k,e0)`。各出射レコードは自身の偏光基底を保持します。
++- 幾何コアの位置・距離は `R` で割った無次元値。`OutgoingSample` の位置と内部長は mm。
++
++8半空間の凸多面体を直接扱い、BVH/OptiX を交差に使いません。
++これは三角形近似を避けた解析的平面交差の選択であり、処理速度の比較結果ではありません。
++CUDA は Driver API のみで起動します。
++
++投影面積は `A = sum_f area(f)*max(0,-dot(n_f,ki))`。
++この項に比例して入射面を選択し、その面上を一様にサンプルします。
++結果は投影シルエット内一様です。初回ヒット率を推定する必要はありません。
++方位角の対称性による削減はまだ適用しません。任意の三次元 `ki` を受け取ります。
++
++## 光束・偏光・経路
++
++`JonesFlux` の二列は二つの直交入力偏光への応答です。
++無偏光を単一の Jones ベクトルで表すものではありません。
++単位無偏光入射に対する残存光束比は
++
++```
++power_fraction = 0.5 * sum(abs(J_ab)^2)
++```
++
++です。透過振幅は
++
++```
++t_flux = sqrt(n_t*cos(theta_t)/(n_i*cos(theta_i))) * t_E
++```
++
++に対応する係数です。コードでは同値な対称形で計算し、斜入射の大きな前置係数と
++小さな電場透過係数を別々に計算することを避けています。
++s/p 基底を毎回回転し、全反射では複素位相を掛けます。
++各面で偏光を無偏光にリセットしません。異なる出射点の複素振幅は合成しません。
++
++凸な一粒子なので、外へ出た枝はその粒子へ再入射しません。
++最初の外部反射を出力し、内部では各界面からの透過枝を出力、反射枝だけを継続します。
++このため保持する次数までの全枝を、指数的な木ではなく線形の内部反射列として列挙できます。
++枝をランダムに一つ選ぶ処理も Russian roulette も使いません。
++外部反射、直接前方透過、高次内部反射経路を、方向を理由に除外しません。
++
++入射レイ k の出射 b の面積重みは
++
++```
++w_kb = A / total_incident_samples * power_fraction_kb
++```
++
++です。バッチサイズでは割りません。次段の配向合成で初めて姿勢の重みを掛けます。
++`total_incident_samples` は全バッチ共通です。seed とグローバル sample ID により
++バッチの区切りを変えても同じ入射点を生成します。
++
++## 終了・失敗の契約
++
++デフォルトは `residual_power_tolerance=1e-12`, `max_internal_hits=256`。
++いずれも全レイの収束認定値ではありません。
++
++- 光束が正確に0なら `exhausted`。
++- 正の残存光束が設定閾値以下なら `tail_tolerance_reached`。残存量自体も保存。
++- 上限までに閾値に届かなければ `interaction_limit`。不合格。
++- 辺・頂点で法線を一意に選べない場合は `ambiguous_boundary`。不合格。
++- 無効な入力、算術異常、出力容量不足、count/write不一致も不合格。
++
++交差の許容幅は無次元座標で `128*DBL_EPSILON*max(1,half_length,|p|,|t|)`。
++これは厳密な区間誤差保証ではありません。狭い形状やほぼ辺上の経路では
++不合格になることがあります。未知の法線で続行したり、失敗レイを捨てて正常扱いしたりしません。
++レイ原点に固定 epsilon を足して自交差を避けることもしていません。
++初回面と次回面を識別して処理します。
++
++光束収支は `escaped + unresolved - 1` を監査します。CLI の許容値は `1e-10`。
++失敗・打ち切りで逃した光束を、出射光束の再正規化で隠しません。
++`complete=true` は全予定レイがこの数値的受理条件を満たした診断出力の完了を示します。
++角度分布や入射サンプル数の収束、Maxwell 解との一致を認定するものではありません。
++
++テストで見つけた長い全反射列では、256回で止めると約0.9813の光束が未回収です。
++このケースは意図どおり拒否され、上限を1024に設定すると366回で閾値に到達します。
++この回帰試験を `long_TIR_residual` として含めています。上限を増やすことはユーザーの明示操作です。
++
++## ビルド
++
++### 既存リポジトリのルートから（CUDA）
++
++既存の CUDA/OptiX 設定を維持して、追加対象だけをビルドします。
++`CMakeLists.txt` への変更は末尾の `add_subdirectory(hex_trace)` 用5行だけです。
++
++```powershell
++cmake -S . -B build -DBUILD_TESTING=ON -DICE_BUILD_HEX_TRACE=ON -DICE_HEX_ENABLE_CUDA=ON -DICE_HEX_BUILD_TESTS=ON
++cmake --build build --config Release --target ice_trace_hex ice_trace_hex_cpu ice_hex_host_tests ice_hex_cuda_tests
++ctest --test-dir build -C Release -R "^ice_hex_" --output-on-failure
++```
++
++Visual Studio generator では `build/hex_trace/Release/` に実行ファイルが置かれます。
++fatbin は対応する実行ファイルの `modules/hex_trace.fatbin` に配置します。
++Ninja の場合は `Release/` を挟みません。
++CUDA の構造体サイズと ABI識別子をロード時に照合します。
++実行時には CUDA が利用できなければ失敗します。成功やスキップとして扱いません。
++
++### CPU参照・ホスト単体テスト（CUDA/OptiX不要）
++
++```powershell
++cmake -S hex_trace -B build-hex-host -DICE_HEX_ENABLE_CUDA=OFF -DICE_HEX_BUILD_TESTS=ON
++cmake --build build-hex-host --config Release
++ctest --test-dir build-hex-host -C Release --output-on-failure
++```
++
++### 六角柱サブディレクトリだけを CUDA ビルド
++
++```powershell
++cmake -S hex_trace -B build-hex-cuda -DICE_HEX_ENABLE_CUDA=ON -DICE_HEX_BUILD_TESTS=ON
++cmake --build build-hex-cuda --config Release
++ctest --test-dir build-hex-cuda -C Release --output-on-failure
++```
++
++この経路は既存リポジトリの Driver API ラッパー4ソースをリンクするので、
++`hex_trace` だけを他所へ移動して CUDA ビルドする使い方ではありません。
++OptiX はこの standalone CUDA ビルドでは要求しません。
++アーキテクチャは既存 root の設定を継承し、standalone の未指定時は86です。
++使用環境に合わせる場合は `-DCMAKE_CUDA_ARCHITECTURES=...` を明示します。
++
++## 実行例（数値検証用の入力屈折率）
++
++```powershell
++.\build\hex_trace\Release\ice_trace_hex.exe --out out\hex_m1 --radius-mm 0.1 --length-mm 0.2 --ki 1 -0.4 0.3 --ior 1.31 --wavelength-nm 550 --samples 4096 --seed 12345 --max-internal-hits 1024 --tail-tolerance 1e-12
++```
++
++CPU 参照ビルドでは実行ファイルを `build-hex-host/Release/ice_trace_hex_cpu.exe` に変更します。
++上書き禁止です。再実行には別の出力先を指定してください。
++
++```
++out/hex_m1/
++  trace_metadata.json   # ice.hex_trace.points.v1。phase_cdfではない
++  outgoing.csv         # 出射方向・位置・Jones応答・光束重み・経路情報
++  rays.csv             # 各入射レイの状態・残存光束・収支
++```
++
++終了コード0: 全予定レイが受理され、`.part` を最終ディレクトリへ変更。
++終了コード2: 数値的品質不合格。`.part` に診断出力を残し、それ以降のバッチは実行しない。
++終了コード1: 無効入力、I/O、GPU、メモリ等のエラー。成功レコードは作らない。
++プロセス中断時やI/O失敗時は `.part` が部分状態で残ることがあります。
++
++GPU API は `HexPrismTracer::outgoing()`, `offsets()`, `audits()` を公開し、
++CUDA上のデータを次段の集計器へ渡せます。`has_result()` はバッファが得られたことだけを示し、
++物理・数値品質の受理ではありません。利用前に audits を検証する責任があります。
++出射データは sample-major CSR。各 ray i の範囲は `offsets[i]..offsets[i+1]`。
++
++## テスト
++
++ホスト11群: 投影面積、独立した三角形meshとの交差比較、入射面分布と底面の二次モーメント、
++Fresnel/Snell/Brewster/TIR、偏光履歴、平行平板の解析光束、斜入射とバッチ不変性、
++60度回転と一様スケール、300条件×100レイ、長い全反射列、異常入力/容量/辺上。
++CLI テスト: JSON、CSV、重み、上書き禁止、不合格時の `.part`、CUDAへの偽のフォールバック防止。
++GPUテスト: ホストとのCSR・方向・位置・光束・Jones全要素・異常系の比較（提供時は未実行）。
++同じコアの CPU/GPU 一致は移植検証であり、独立の物理ソルバによる検証ではありません。
++
++## 参照
++
++- Mitsuba 3, Polarization / Fresnel equations:
++  https://mitsuba.readthedocs.io/en/stable/src/key_topics/polarization.html
++- NVIDIA, CUDA Driver API / modules:
++  https://docs.nvidia.com/cuda/cuda-programming-guide/03-advanced/driver-api.html
++- CMake, CUDA_FATBIN_COMPILATION:
++  https://cmake.org/cmake/help/latest/prop_tgt/CUDA_FATBIN_COMPILATION.html
++
++本実装はこれらのソースコードをコピーしたものではなく、上記の光束・座標契約で記述したものです。
++Sadeghi2012 の雨滴用パッチ、焦線、回折フィルタを六角柱に流用していません。
+diff --git a/hex_trace/apps/trace_hex.cpp b/hex_trace/apps/trace_hex.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..50cef50c47b21403d821baec6f8436d12f17fe79
+--- /dev/null
++++ b/hex_trace/apps/trace_hex.cpp
+@@ -0,0 +1,243 @@
++#include <ice_crystal/hex_trace.hpp>
++#if defined(ICE_HEX_HAS_CUDA)
++#include <ice_crystal/hex_trace_cuda.hpp>
++#endif
++#include <algorithm>
++#include <charconv>
++#include <filesystem>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <limits>
++#include <locale>
++#include <memory>
++#include <set>
++#include <stdexcept>
++#include <string>
++#include <string_view>
++
++namespace
++{
++using namespace iceCrystal;
++struct Options
++{
++    HexPrism prism{};Vec3 incident{};
++    double exterior_index=1,index=0,wavelength_nm=0,tail=1e-12;
++    std::uint64_t samples=0,seed=0;
++    unsigned hits=256;std::size_t batch=4096,max_outputs=4*1024*1024;
++    int device=0;
++#if defined(ICE_HEX_HAS_CUDA)
++    std::string backend="cuda";
++#else
++    std::string backend="cpu";
++#endif
++    std::filesystem::path out,module;
++};
++double real(std::string_view s)
++{
++    double v=0;auto r=std::from_chars(s.data(),s.data()+s.size(),v);
++    if(r.ec!=std::errc{}||r.ptr!=s.data()+s.size()||!finite_value(v))throw std::invalid_argument("Invalid finite real: "+std::string(s));
++    return v;
++}
++std::uint64_t integer(std::string_view s)
++{
++    std::uint64_t v=0;auto r=std::from_chars(s.data(),s.data()+s.size(),v);
++    if(r.ec!=std::errc{}||r.ptr!=s.data()+s.size())throw std::invalid_argument("Invalid nonnegative integer: "+std::string(s));
++    return v;
++}
++template<class T> T bounded_integer(std::string_view s)
++{
++    auto n=integer(s);
++    if(n>static_cast<std::uint64_t>((std::numeric_limits<T>::max)()))throw std::out_of_range("Integer option exceeds its type.");
++    return static_cast<T>(n);
++}
++void help()
++{
++    std::cout<<"Hex-prism M1: fixed-orientation, flux-polarized geometrical tracing\n"
++        "Required: --out DIR --radius-mm R --length-mm L --ki X Y Z\n"
++        "          --ior N --wavelength-nm LAMBDA --samples N\n"
++        "Options:  --external-ior 1 --seed 0 --batch-size 4096\n"
++        "          --max-internal-hits 256 --tail-tolerance 1e-12\n"
++        "          --max-output-records 4194304 --backend cpu|cuda --device 0\n"
++        "          --module PATH_TO_FATBIN\n"
++        "R is circumradius, L is FULL prism length. Axial direction is +y.\n"
++        "IOR is caller-supplied at the stated vacuum wavelength; NOT an ice spectrum.\n"
++        "No orientation averaging, CDF, absorption, birefringence, diffraction,\n"
++        "or inter-path interference is computed by this M1 executable.\n"
++        "An unaccepted result stays in DIR.part and returns exit code 2.\n";
++}
++std::filesystem::path path_from_utf8(std::string_view bytes)
++{
++    std::u8string utf8;utf8.reserve(bytes.size());
++    for(unsigned char c:bytes)utf8.push_back(static_cast<char8_t>(c));
++    return std::filesystem::path(utf8);
++}
++Options parse(int argc,char** argv)
++{
++    Options o;
++    o.module=std::filesystem::absolute(path_from_utf8(argv[0])).parent_path()/"modules"/"hex_trace.fatbin";
++    std::set<std::string> seen;
++    for(int i=1;i<argc;++i)
++    {
++        const std::string key=argv[i];
++        if(!seen.insert(key).second)throw std::invalid_argument("Duplicate option: "+key);
++        auto next=[&]() -> std::string_view {if(++i>=argc)throw std::invalid_argument("Missing value for "+key);return argv[i];};
++        if(key=="--out")o.out=path_from_utf8(next());
++        else if(key=="--module")o.module=path_from_utf8(next());
++        else if(key=="--ki"){o.incident.x=real(next());o.incident.y=real(next());o.incident.z=real(next());}
++        else if(key=="--radius-mm")o.prism.circumradius_mm=real(next());
++        else if(key=="--length-mm")o.prism.length_mm=real(next());
++        else if(key=="--ior")o.index=real(next());
++        else if(key=="--external-ior")o.exterior_index=real(next());
++        else if(key=="--wavelength-nm")o.wavelength_nm=real(next());
++        else if(key=="--tail-tolerance")o.tail=real(next());
++        else if(key=="--samples")o.samples=integer(next());
++        else if(key=="--seed")o.seed=integer(next());
++        else if(key=="--max-internal-hits")o.hits=bounded_integer<unsigned>(next());
++        else if(key=="--batch-size")o.batch=bounded_integer<std::size_t>(next());
++        else if(key=="--max-output-records")o.max_outputs=bounded_integer<std::size_t>(next());
++        else if(key=="--device")o.device=bounded_integer<int>(next());
++        else if(key=="--backend")o.backend=std::string(next());
++        else throw std::invalid_argument("Unknown option: "+key);
++    }
++    for(const char* key:{"--out","--radius-mm","--length-mm","--ki","--ior","--wavelength-nm","--samples"})
++        if(!seen.contains(key))throw std::invalid_argument(std::string("Required option: ")+key);
++    if(!(o.wavelength_nm>0)||!o.batch||!o.max_outputs||o.out.empty())throw std::invalid_argument("Nonpositive wavelength/batch/budget or empty output.");
++    if(o.backend!="cpu"&&o.backend!="cuda")throw std::invalid_argument("Backend must be cpu or cuda.");
++#if !defined(ICE_HEX_HAS_CUDA)
++    if(o.backend!="cpu")throw std::invalid_argument("This is a CPU reference build; CUDA is not compiled. No fallback.");
++#endif
++    return o;
++}
++std::ofstream file(const std::filesystem::path& p)
++{
++    std::ofstream f(p,std::ios::binary|std::ios::trunc);
++    if(!f)throw std::runtime_error("Cannot open output: "+p.string());
++    f.exceptions(std::ios::badbit|std::ios::failbit);f.imbue(std::locale::classic());f<<std::setprecision(17);return f;
++}
++void xyz(std::ostream& f,Vec3 v){f<<v.x<<','<<v.y<<','<<v.z;}
++void metadata(const std::filesystem::path& p,const Options& o,const TraceSettings& c,const TraceSummary& s)
++{
++    auto f=file(p);const double area=c.prism.projected_area_mm2(c.incident_direction);
++    const bool complete=s.accepted&&s.rays==o.samples;
++    f<<"{\n  \"schema\": \"ice.hex_trace.points.v1\",\n  \"generator_version\": \"ice.hex_trace.m1.v1\",\n"
++     <<"  \"complete\": "<<(complete?"true":"false")<<",\n  \"quality_accepted\": "<<(s.accepted?"true":"false")<<",\n"
++     <<"  \"phase_cdf_record\": false,\n  \"backend\": \""<<o.backend<<"\",\n"
++     <<"  \"model\": \"nonabsorbing_isotropic_geometrical_optics_incoherent_paths\",\n"
++     <<"  \"polarization\": \"two_input_flux_Jones_response_unpolarized_incident\",\n"
++     <<"  \"tir_relative_phase_retained\": true,\n  \"inter_path_interference\": false,\n"
++     <<"  \"diffraction\": false,\n  \"birefringence\": false,\n  \"absorption\": false,\n"
++     <<"  \"index_model\": \"caller_supplied_real_index_at_wavelength\",\n"
++     <<"  \"wavelength_vacuum_nm\": "<<o.wavelength_nm<<",\n"
++     <<"  \"exterior_index\": "<<c.exterior_index<<",\n  \"interior_index\": "<<c.interior_index<<",\n"
++     <<"  \"circumradius_mm\": "<<c.prism.circumradius_mm<<",\n  \"full_length_mm\": "<<c.prism.length_mm<<",\n"
++     <<"  \"direction_convention\": \"physical_propagation\",\n  \"body_long_axis\": [0,1,0],\n"
++     <<"  \"incident_direction\": [";xyz(f,c.incident_direction);f<<"],\n"
++     <<"  \"incident_frame_e0\": [";xyz(f,c.incident_frame.e0);f<<"],\n"
++     <<"  \"incident_frame_e1\": [";xyz(f,c.incident_frame.e1);f<<"],\n"
++     <<"  \"projected_area_mm2\": "<<area<<",\n  \"planned_samples\": "<<o.samples<<",\n"
++     <<"  \"processed_samples\": "<<s.rays<<",\n  \"seed\": "<<o.seed<<",\n"
++     <<"  \"sample_generator\": \"counter_splitmix64_open52_v1\",\n"
++     <<"  \"batch_size\": "<<o.batch<<",\n  \"max_output_records_per_batch\": "<<o.max_outputs<<",\n"
++     <<"  \"max_internal_hits\": "<<o.hits<<",\n  \"residual_power_tolerance_per_ray\": "<<o.tail<<",\n"
++     <<"  \"geometry_fp64_tolerance_epsilon_multiplier\": 128,\n"
++     <<"  \"geometry_tolerance_is_rigorous_bound\": false,\n"
++     <<"  \"outgoing_count\": "<<s.outputs<<",\n  \"escaped_power_sum\": "<<s.escaped_power_sum<<",\n"
++     <<"  \"unresolved_power_sum\": "<<s.unresolved_power_sum<<",\n"
++     <<"  \"maximum_balance_error\": "<<s.maximum_balance_error<<",\n"
++     <<"  \"maximum_interface_balance_error\": "<<s.maximum_interface_balance_error<<",\n"
++     <<"  \"output_weight\": \"projected_area_mm2 / planned_samples * power_fraction\",\n"
++     <<"  \"renormalized_to_escaped_power\": false,\n  \"status_counts\": {";
++    for(unsigned i=0;i<8;++i)f<<(i?",":"")<<"\n    \""<<status_name(static_cast<TraceStatus>(i))<<"\": "<<s.status_counts[i];
++    f<<"\n  }\n}\n";f.close();
++}
++int run(const Options& o)
++{
++    auto c=make_trace_settings(o.prism,o.incident,o.exterior_index,o.index,o.samples,o.seed,o.hits,o.tail);
++    auto part=o.out;part+=".part";
++    if(std::filesystem::exists(o.out)||std::filesystem::exists(part))throw std::runtime_error("Output or .part already exists; refusing to overwrite.");
++#if defined(ICE_HEX_HAS_CUDA)
++    std::unique_ptr<rainbow::CudaContext> context;
++    std::unique_ptr<HexPrismTracer> tracer;
++    if(o.backend=="cuda")
++    {
++        context=std::make_unique<rainbow::CudaContext>(o.device);
++        tracer=std::make_unique<HexPrismTracer>(*context);tracer->load_module(o.module);
++    }
++#endif
++    std::filesystem::create_directories(part);
++    auto out=file(part/"outgoing.csv"),rays=file(part/"rays.csv");
++    out<<"sample_id,kind,entry_face,exit_face,internal_reflections,x_mm,y_mm,z_mm,dx,dy,dz,"
++        "e0x,e0y,e0z,e1x,e1y,e1z,power_fraction,weight_mm2,internal_length_mm,"
++        "j00_re,j00_im,j10_re,j10_im,j01_re,j01_im,j11_re,j11_im\n";
++    rays<<"sample_id,status,output_count,internal_hits,tir_count,escaped_power,unresolved_power,balance_error,max_interface_error\n";
++    TraceSummary total{};const double area_per_ray=c.prism.projected_area_mm2(c.incident_direction)/double(o.samples);
++    for(std::uint64_t first=0;first<o.samples;)
++    {
++        const auto n=static_cast<std::size_t>((std::min)(std::uint64_t(o.batch),o.samples-first));
++        TraceBatch b{};
++#if defined(ICE_HEX_HAS_CUDA)
++        if(tracer){tracer->trace(c,first,n,o.max_outputs);b=tracer->download();}
++        else
++#endif
++        b=trace_batch_cpu(c,first,n,o.max_outputs);
++        for(const auto& s:b.outgoing)
++        {
++            const double weight=area_per_ray*s.power_fraction;
++            if(!finite_value(weight)||(s.power_fraction>0&&!(weight>0)))
++                throw std::runtime_error("Output area weight over/underflow; refusing a completed point record.");
++            out<<s.incident_sample_id<<','<<static_cast<unsigned>(s.kind)<<','<<s.entry_face<<','<<s.exit_face<<','<<s.internal_reflections<<',';
++            xyz(out,s.position_mm);out<<',';xyz(out,s.direction);out<<',';xyz(out,s.frame.e0);out<<',';xyz(out,s.frame.e1);
++            out<<','<<s.power_fraction<<','<<weight<<','<<s.internal_length_mm;
++            for(const auto& col:s.response.column)out<<','<<col.x.re<<','<<col.x.im<<','<<col.y.re<<','<<col.y.im;
++            out<<'\n';
++        }
++        for(std::size_t i=0;i<b.audits.size();++i)
++        {
++            const auto& a=b.audits[i];
++            rays<<first+i<<','<<status_name(a.status)<<','<<a.output_count<<','<<a.internal_hits<<','<<a.tir_count<<','
++                <<a.escaped_power<<','<<a.unresolved_power<<','<<a.balance_error<<','<<a.max_interface_balance_error<<'\n';
++        }
++        const auto summary=summarize(b.audits);merge_summary(total,summary);first+=n;
++        if(!summary.accepted)break;
++    }
++    out.close();rays.close();metadata(part/"trace_metadata.json",o,c,total);
++    std::cout<<std::setprecision(17)<<"backend="<<o.backend<<" rays="<<total.rays<<" outputs="<<total.outputs
++        <<" escaped_mean="<<total.escaped_power_sum/double(total.rays)
++        <<" unresolved_mean="<<total.unresolved_power_sum/double(total.rays)
++        <<" max_balance_error="<<total.maximum_balance_error<<'\n';
++    if(!total.accepted||total.rays!=o.samples)
++    {std::cerr<<"Trace rejected; diagnostics remain in "<<part<<". No normalization or success commit.\n";return 2;}
++    std::filesystem::rename(part,o.out);return 0;
++}
++}
++int run_main(int argc,char** argv)
++{
++    try
++    {
++        if(argc==2 && std::string_view(argv[1])=="--help"){help();return 0;}
++        return run(parse(argc,argv));
++    }
++    catch(const std::exception& e){std::cerr<<"ice_trace_hex: "<<e.what()<<'\n';return 1;}
++}
++
++#if defined(_WIN32)
++int wmain(int argc,wchar_t** argv)
++{
++    try
++    {
++        std::vector<std::string> storage;storage.reserve(static_cast<std::size_t>(argc));
++        for(int i=0;i<argc;++i)
++        {
++            const auto u=std::filesystem::path(argv[i]).u8string();
++            storage.emplace_back(reinterpret_cast<const char*>(u.data()),u.size());
++        }
++        std::vector<char*> args;args.reserve(storage.size());
++        for(auto& a:storage)args.push_back(a.data());
++        return run_main(argc,args.data());
++    }
++    catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
++}
++#else
++int main(int argc,char** argv){return run_main(argc,argv);}
++#endif
+diff --git a/hex_trace/device/hex_trace.cu b/hex_trace/device/hex_trace.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..11874b189cb82df24d9866619faa8ad8d98d71f4
+--- /dev/null
++++ b/hex_trace/device/hex_trace.cu
+@@ -0,0 +1,49 @@
++#include <ice_crystal/hex_trace_core.hpp>
++using namespace iceCrystal;
++
++// ABI fingerprint includes structure sizes, so a stale module is rejected even
++// before the first expensive tracing pass.
++extern "C" __global__ void ice_hex_trace_abi_v1(std::uint64_t* words)
++{
++    if(blockIdx.x||threadIdx.x)return;
++    words[0]=UINT64_C(0x4943454845580001);
++    words[1]=sizeof(TraceSettings);words[2]=sizeof(RayAudit);words[3]=sizeof(OutgoingSample);
++}
++extern "C" __global__ void ice_hex_trace_count(TraceSettings s,std::uint64_t first,
++    std::uint64_t count,RayAudit* audits)
++{
++    for(std::uint64_t i=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;i<count;
++        i+=std::uint64_t(gridDim.x)*blockDim.x)
++    {
++        CountSink sink{};audits[i]=trace_sample(s,first+i,sink);
++    }
++}
++// Ordered integer prefix, exact unless overflow is reported. The array is only
++// one entry per INCIDENT ray, not per outgoing direction or phase-function cell.
++// Kept simple for M1; no change of estimator is involved.
++extern "C" __global__ void ice_hex_trace_offsets(const RayAudit* audits,std::uint64_t n,
++    std::uint64_t* offsets,std::uint64_t* total)
++{
++    if(blockIdx.x||threadIdx.x)return;
++    offsets[0]=0;std::uint64_t sum=0;
++    for(std::uint64_t i=0;i<n;++i)
++    {
++        const auto c=audits[i].output_count;
++        if(c>~std::uint64_t{0}-sum){*total=~std::uint64_t{0};return;}
++        sum+=c;offsets[i+1]=sum;
++    }
++    *total=sum;
++}
++extern "C" __global__ void ice_hex_trace_write(TraceSettings s,std::uint64_t first,
++    std::uint64_t count,const std::uint64_t* offsets,OutgoingSample* output,RayAudit* audits)
++{
++    for(std::uint64_t i=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;i<count;
++        i+=std::uint64_t(gridDim.x)*blockDim.x)
++    {
++        const auto n=offsets[i+1]-offsets[i];
++        BufferSink sink{n?output+offsets[i]:nullptr,n,0};
++        const auto replay=trace_sample(s,first+i,sink);
++        if(!replay_equal(audits[i],replay)||sink.size!=n)
++            audits[i].status=TraceStatus::ReplayMismatch;
++    }
++}
+diff --git a/hex_trace/include/ice_crystal/flux_interface.hpp b/hex_trace/include/ice_crystal/flux_interface.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf57a975bfd3cfd3ca6d275fd19beb677c3b098b
+--- /dev/null
++++ b/hex_trace/include/ice_crystal/flux_interface.hpp
+@@ -0,0 +1,89 @@
++#pragma once
++#include <ice_crystal/math.hpp>
++
++namespace iceCrystal
++{
++struct FluxRay { Vec3 direction; Frame frame; JonesFlux response; };
++struct FluxBranches
++{
++    FluxRay reflected,transmitted;
++    double balance_error=0;
++    bool valid=false,has_transmission=false,total_internal_reflection=false;
++};
++ICE_HD inline Complex tir_phase(double a,double b) noexcept
++{
++    const double s=max_value(::fabs(a),::fabs(b));
++    a/=s;b/=s;
++    const double den=a*a+b*b;
++    return {(a*a-b*b)/den,-2*a*b/den};
++}
++
++// Nonabsorbing, nonmagnetic, ISOTROPIC dielectrics. The normal points into the
++// incident medium. A JonesFlux norm represents POWER, not electric intensity:
++// t_flux = sqrt(n_t*cos_t/(n_i*cos_i))*t_E.
++// The equivalent symmetric formula below avoids a divergent grazing prefactor.
++// Complex TIR phases are retained even though different paths are NOT interfered.
++ICE_HD inline FluxBranches split_flux(const FluxRay& ray,Vec3 n,double ni,double nt) noexcept
++{
++    FluxBranches b{};
++    if(!ray.frame.valid(ray.direction)||!is_unit(n)||!ray.response.is_finite()||
++        !(ni>0&&nt>0&&finite_value(ni)&&finite_value(nt)))return b;
++    double ci=-ray.direction.dot(n);
++    if(ci<0 || ci>1+128*DBL_EPSILON)return b;
++    if(ci>1)ci=1; // unit-vector roundoff only, never an optical coefficient repair
++    if(ni==nt)
++    {
++        b.transmitted=ray;b.has_transmission=true;
++        b.reflected.direction=ray.direction+n*(2*ci);
++        if(!normalize(b.reflected.direction,b.reflected.direction))return b;
++        if(!make_frame(b.reflected.direction,b.reflected.frame))return b;
++        b.valid=true;return b;
++    }
++    Vec3 s=ray.direction.cross(n);
++    const double scale=s.max_abs();
++    const Vec3 scaled=scale>0?s/scale:Vec3{};
++    const double sine=scale*::sqrt(scaled.dot(scaled));
++    if(sine>0) { if(!normalize(s,s))return b; }
++    else s=ray.frame.e0;
++    Vec3 pin{};
++    if(!normalize(ray.direction.cross(s),pin))return b;
++    const auto j=change_frame(ray.response,ray.frame,{s,pin});
++    const double ns=max_value(ni,nt),a=ni/ns,c=nt/ns,eta=a/c;
++    if(!finite_value(eta)||!(a>0&&c>0))return b;
++    const double st=eta*sine;
++    if(!finite_value(st))return b;
++    if(!normalize(ray.direction+n*(2*ci),b.reflected.direction))return b;
++    b.reflected.frame.e0=s;
++    if(!normalize(b.reflected.direction.cross(s),b.reflected.frame.e1))return b;
++    Complex rs{},rp{};
++    if(st>1)
++    {
++        const double inverse=1/st;
++        const double beta=st*::sqrt((1-inverse)*(1+inverse));
++        rs=tir_phase(a*ci,c*beta);rp=tir_phase(c*ci,a*beta);
++        b.total_internal_reflection=true;
++    }
++    else
++    {
++        const double ct=::sqrt((1-st)*(1+st));
++        const double ds=a*ci+c*ct,dp=c*ci+a*ct;
++        if(!(ds>0&&dp>0))return b;
++        rs={(a*ci-c*ct)/ds,0};rp={(c*ci-a*ct)/dp,0};
++        const double numerator=2*::sqrt(a*ci)*::sqrt(c*ct);
++        const double ts=numerator/ds,tp=numerator/dp;
++        b.transmitted.response=scale_rows(j,{ts,0},{tp,0});
++        if(!normalize((ray.direction+n*ci)*eta-n*ct,b.transmitted.direction))return b;
++        b.transmitted.frame.e0=s;
++        if(!normalize(b.transmitted.direction.cross(s),b.transmitted.frame.e1))return b;
++        b.has_transmission=true;
++    }
++    b.reflected.response=scale_rows(j,rs,rp);
++    const double before=ray.response.power();
++    const double after=b.reflected.response.power()+(b.has_transmission?b.transmitted.response.power():0);
++    b.balance_error=after-before;
++    b.valid=b.reflected.frame.valid(b.reflected.direction)&&b.reflected.response.is_finite()&&
++        (!b.has_transmission || (b.transmitted.frame.valid(b.transmitted.direction)&&b.transmitted.response.is_finite()))&&
++        finite_value(b.balance_error) && ::fabs(b.balance_error)<=2048*DBL_EPSILON*max_value(before,DBL_MIN);
++    return b;
++}
++} // namespace iceCrystal
+diff --git a/hex_trace/include/ice_crystal/hex_prism.hpp b/hex_trace/include/ice_crystal/hex_prism.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c44455958b5c7d0b1d2e5eb0acaa4f4c08720ba
+--- /dev/null
++++ b/hex_trace/include/ice_crystal/hex_prism.hpp
+@@ -0,0 +1,176 @@
++#pragma once
++#include <ice_crystal/math.hpp>
++
++namespace iceCrystal
++{
++// Right regular hexagonal prism, centered at zero, longitudinal axis +y.
++// Side face j (0..5): n=(cos(j*pi/3),0,sin(j*pi/3)), n.x <= sqrt(3)*R/2.
++// Face 6: +y; face 7: -y. R is circumradius, L is FULL length, both mm.
++// Geometry calculations use x/R so uniform rescaling does not change tolerances.
++struct HexPrism
++{
++    double circumradius_mm=0, length_mm=0;
++    ICE_HD double half_length() const noexcept { return 0.5*(length_mm/circumradius_mm); }
++    ICE_HD bool valid() const noexcept
++    {
++        return finite_value(circumradius_mm)&&finite_value(length_mm)&&circumradius_mm>0&&length_mm>0&&
++            finite_value(half_length())&&half_length()>0 &&
++            finite_value(circumradius_mm*circumradius_mm)&&circumradius_mm*circumradius_mm>0 &&
++            finite_value(circumradius_mm*length_mm)&&circumradius_mm*length_mm>0;
++    }
++    ICE_HD Vec3 normal(unsigned f) const noexcept
++    {
++        switch(f)
++        {
++        case 0:return {1,0,0}; case 1:return {0.5,0,sqrt3/2};
++        case 2:return {-0.5,0,sqrt3/2};case 3:return {-1,0,0};
++        case 4:return {-0.5,0,-sqrt3/2};case 5:return {0.5,0,-sqrt3/2};
++        case 6:return {0,1,0};case 7:return {0,-1,0};default:return {};
++        }
++    }
++    ICE_HD Vec3 vertex(unsigned f) const noexcept
++    {
++        switch(f%6)
++        {
++        case 0:return {sqrt3/2,0,0.5};case 1:return {0,0,1};
++        case 2:return {-sqrt3/2,0,0.5};case 3:return {-sqrt3/2,0,-0.5};
++        case 4:return {0,0,-1}; default:return {sqrt3/2,0,-0.5};
++        }
++    }
++    ICE_HD double offset(unsigned f) const noexcept { return f<6?sqrt3/2:half_length(); }
++    ICE_HD double face_area_mm2(unsigned f) const noexcept
++    { return f<6?circumradius_mm*length_mm:(3*sqrt3/2)*circumradius_mm*circumradius_mm; }
++    ICE_HD double surface_area_mm2() const noexcept
++    { return 6*face_area_mm2(0)+2*face_area_mm2(6); }
++    ICE_HD double projected_area_mm2(Vec3 k) const noexcept
++    {
++        Sum a{};
++        for(unsigned f=0;f<8;++f)
++            a.add(face_area_mm2(f)*max_value(0,-normal(f).dot(k)));
++        return a.value;
++    }
++};
++
++ICE_HD inline double geometry_tolerance(const HexPrism& h,Vec3 p,double t=0) noexcept
++{
++    return 128*DBL_EPSILON*max_value(1,max_value(h.half_length(),max_value(p.max_abs(),::fabs(t))));
++}
++struct EntrySample
++{
++    Vec3 position; // normalized body coordinates x/R; NOT mm
++    unsigned face=8;
++    bool valid=false;
++};
++ICE_HD inline EntrySample sample_entry(const HexPrism& h,Vec3 k,double u0,double u1,double u2) noexcept
++{
++    EntrySample s{};
++    if(!h.valid()||!is_unit(k)||!(u0>=0&&u0<1&&u1>=0&&u1<1&&u2>=0&&u2<1)) return s;
++    const double a=h.projected_area_mm2(k);
++    if(!(a>0)||!finite_value(a)) return s;
++    const double target=u0*a;
++    double accumulated=0;
++    unsigned last=8;
++    for(unsigned f=0;f<8;++f)
++    {
++        const double w=h.face_area_mm2(f)*max_value(0,-h.normal(f).dot(k));
++        if(!(w>0)) continue;
++        last=f; accumulated+=w;
++        if(target<accumulated) { s.face=f; break; }
++    }
++    // Only the rounding-sized final interval; never select a back-facing face.
++    if(s.face==8) s.face=last;
++    if(s.face==8) return s;
++    if(s.face<6)
++    {
++        const auto n=h.normal(s.face);
++        const Vec3 tangent{-n.z,0,n.x};
++        s.position=n*(sqrt3/2)+tangent*(u1-0.5)+Vec3{0,(2*u2-1)*h.half_length(),0};
++    }
++    else
++    {
++        const double sector=6*u1;
++        const auto j=static_cast<unsigned>(sector);
++        const double r=::sqrt(sector-double(j));
++        s.position=(h.vertex(j)*(1-u2)+h.vertex(j+1)*u2)*r;
++        s.position.y=(s.face==6?1:-1)*h.half_length();
++    }
++    s.valid=s.position.is_finite();return s;
++}
++
++enum class HitStatus : std::uint32_t { Regular, Miss, AmbiguousBoundary, Invalid };
++struct BoundaryHit
++{
++    Vec3 position;
++    double distance=0; // distance / R; direction must be unit length
++    unsigned face=8;
++    HitStatus status=HitStatus::Invalid;
++};
++ICE_HD inline bool strict_face_point(const HexPrism& h,Vec3 p,unsigned face) noexcept
++{
++    if(face>=8 || !p.is_finite()) return false;
++    const double tol=geometry_tolerance(h,p);
++    for(unsigned f=0;f<8;++f)
++    {
++        const double gap=h.offset(f)-h.normal(f).dot(p);
++        if(f==face) { if(::fabs(gap)>tol) return false; }
++        else if(!(gap>tol)) return false;
++    }
++    return true;
++}
++
++// For an internal ray starting on a KNOWN face. No origin shift or epsilon
++// t-min. An unresolved edge/vertex is reported, not assigned an arbitrary normal.
++ICE_HD inline BoundaryHit next_boundary(const HexPrism& h,Vec3 p,Vec3 d,unsigned start_face) noexcept
++{
++    BoundaryHit hit{};
++    if(!h.valid()||!is_unit(d)||start_face>=8) return hit;
++    if(!strict_face_point(h,p,start_face)) { hit.status=HitStatus::AmbiguousBoundary;return hit; }
++    if(h.normal(start_face).dot(d)>128*DBL_EPSILON) return hit;
++    double best=DBL_MAX,second=DBL_MAX;
++    for(unsigned f=0;f<8;++f)
++    {
++        if(f==start_face) continue;
++        const double cosine=h.normal(f).dot(d);
++        if(!(cosine>0)) continue;
++        const double t=(h.offset(f)-h.normal(f).dot(p))/cosine;
++        if(!(t>0)||!finite_value(t)) continue;
++        if(t<best) {second=best;best=t;hit.face=f;}
++        else if(t<second)second=t;
++    }
++    if(hit.face==8)return hit;
++    hit.distance=best;hit.position=p+d*best;
++    const double tol=geometry_tolerance(h,hit.position,best);
++    if(second-best<=tol || !strict_face_point(h,hit.position,hit.face))
++        hit.status=HitStatus::AmbiguousBoundary;
++    else hit.status=HitStatus::Regular;
++    return hit;
++}
++
++// External half-space clipping. Returns the first nonnegative boundary. Input
++// and output are normalized body coordinates; useful for independent ray tests.
++ICE_HD inline BoundaryHit intersect_prism(const HexPrism& h,Vec3 p,Vec3 d) noexcept
++{
++    BoundaryHit hit{};
++    if(!h.valid()||!p.is_finite()||!is_unit(d))return hit;
++    double near_t=-DBL_MAX,far_t=DBL_MAX;
++    unsigned near_f=8,far_f=8;
++    for(unsigned f=0;f<8;++f)
++    {
++        const double gap=h.offset(f)-h.normal(f).dot(p),den=h.normal(f).dot(d);
++        if(den==0)
++        {
++            if(gap<0){hit.status=HitStatus::Miss;return hit;}
++            continue;
++        }
++        const double t=gap/den;
++        if(den<0 && t>near_t){near_t=t;near_f=f;}
++        if(den>0 && t<far_t){far_t=t;far_f=f;}
++    }
++    if(far_t<near_t || far_t<0){hit.status=HitStatus::Miss;return hit;}
++    hit.distance=near_t>=0?near_t:far_t;hit.face=near_t>=0?near_f:far_f;
++    if(hit.face==8||!finite_value(hit.distance))return hit;
++    hit.position=p+d*hit.distance;
++    hit.status=strict_face_point(h,hit.position,hit.face)?HitStatus::Regular:HitStatus::AmbiguousBoundary;
++    return hit;
++}
++} // namespace iceCrystal
+diff --git a/hex_trace/include/ice_crystal/hex_trace.hpp b/hex_trace/include/ice_crystal/hex_trace.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6515f8847a56638f985b52507a3e78bd8e6a27e4
+--- /dev/null
++++ b/hex_trace/include/ice_crystal/hex_trace.hpp
+@@ -0,0 +1,36 @@
++#pragma once
++#include <ice_crystal/hex_trace_core.hpp>
++#include <cstddef>
++#include <span>
++#include <vector>
++
++namespace iceCrystal
++{
++// Host validation and CPU reference use the SAME core as the CUDA kernels.
++// Direction normalization is explicit here; no hidden fallback direction.
++TraceSettings make_trace_settings(HexPrism prism,Vec3 incident,double exterior_index,
++    double interior_index,std::uint64_t total_samples,std::uint64_t seed,
++    std::uint32_t max_internal_hits,double residual_power_tolerance);
++void validate_settings(const TraceSettings&);
++void validate_batch_range(const TraceSettings&,std::uint64_t first,std::size_t count);
++const char* status_name(TraceStatus) noexcept;
++struct TraceBatch
++{
++    std::uint64_t first_sample=0;
++    std::vector<RayAudit> audits;
++    std::vector<std::uint64_t> offsets; // CSR range [offsets[i], offsets[i+1])
++    std::vector<OutgoingSample> outgoing;
++};
++TraceBatch trace_batch_cpu(const TraceSettings&,std::uint64_t first,std::size_t count,
++    std::size_t maximum_output_records=4*1024*1024);
++struct TraceSummary
++{
++    std::uint64_t rays=0,outputs=0,status_counts[8]{};
++    double escaped_power_sum=0,unresolved_power_sum=0;
++    double maximum_balance_error=0,maximum_interface_balance_error=0;
++    bool accepted=true;
++};
++TraceSummary summarize(std::span<const RayAudit> audits,double balance_tolerance=1e-10);
++void merge_summary(TraceSummary& destination,const TraceSummary& source);
++void require_accepted(const TraceSummary&);
++} // namespace iceCrystal
+diff --git a/hex_trace/include/ice_crystal/hex_trace_core.hpp b/hex_trace/include/ice_crystal/hex_trace_core.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..d971da557ab98ba3ae44e368760edf864fb60118
+--- /dev/null
++++ b/hex_trace/include/ice_crystal/hex_trace_core.hpp
+@@ -0,0 +1,181 @@
++#pragma once
++#include <ice_crystal/hex_prism.hpp>
++#include <ice_crystal/flux_interface.hpp>
++#include <type_traits>
++
++namespace iceCrystal
++{
++enum class TraceStatus : std::uint32_t
++{
++    Exhausted=0, TailToleranceReached=1, InteractionLimit=2,
++    AmbiguousBoundary=3, InvalidInput=4, NumericalFailure=5,
++    OutputOverflow=6, ReplayMismatch=7
++};
++enum class ExitKind : std::uint32_t { ExteriorReflection=0, InteriorTransmission=1 };
++struct TraceSettings
++{
++    HexPrism prism{};
++    Vec3 incident_direction{};
++    Frame incident_frame{};
++    // Evaluated indices supplied by the caller for its wavelength. No built-in
++    // constant is silently presented as ice dispersion or birefringent ice.
++    double exterior_index=0,interior_index=0;
++    double residual_power_tolerance=1e-12; // absolute fraction of each unit ray
++    std::uint64_t seed=0,total_incident_samples=0;
++    std::uint32_t max_internal_hits=256;
++    std::uint32_t reserved=0;
++};
++struct OutgoingSample
++{
++    Vec3 position_mm,direction;
++    Frame frame;
++    JonesFlux response;
++    double power_fraction=0;
++    double internal_length_mm=0;
++    std::uint64_t incident_sample_id=0;
++    std::uint32_t entry_face=8,exit_face=8,internal_reflections=0;
++    ExitKind kind=ExitKind::ExteriorReflection;
++    // Physical cell contribution (before orientation weighting):
++    // projected_area_mm2 / total_incident_samples * power_fraction.
++};
++struct RayAudit
++{
++    double escaped_power=0,unresolved_power=1,balance_error=0;
++    double max_interface_balance_error=0;
++    std::uint64_t output_count=0;
++    std::uint32_t internal_hits=0,tir_count=0;
++    TraceStatus status=TraceStatus::InvalidInput;
++    std::uint32_t reserved=0;
++};
++struct CountSink
++{
++    ICE_HD bool push(const OutgoingSample&) noexcept {return true;}
++};
++struct BufferSink
++{
++    OutgoingSample* data=nullptr;
++    std::uint64_t capacity=0,size=0;
++    ICE_HD bool push(const OutgoingSample& s) noexcept
++    {
++        if(size>=capacity||!data)return false;
++        data[size++]=s;return true;
++    }
++};
++ICE_HD inline bool accepted_status(TraceStatus s) noexcept
++{ return s==TraceStatus::Exhausted || s==TraceStatus::TailToleranceReached; }
++ICE_HD inline bool settings_valid(const TraceSettings& c) noexcept
++{
++    const double a=c.prism.projected_area_mm2(c.incident_direction);
++    return c.prism.valid()&&c.incident_frame.valid(c.incident_direction)&&
++        finite_value(c.exterior_index)&&finite_value(c.interior_index)&&c.exterior_index>0&&c.interior_index>0&&
++        finite_value(c.residual_power_tolerance)&&c.residual_power_tolerance>=0&&c.residual_power_tolerance<1&&
++        c.total_incident_samples>0&&c.max_internal_hits>0&&finite_value(a)&&a>0;
++}
++ICE_HD inline RayAudit finish_audit(RayAudit a,const Sum& escaped,double residual,TraceStatus status) noexcept
++{
++    a.escaped_power=escaped.value;a.unresolved_power=residual;
++    a.balance_error=escaped.value+residual-1;a.status=status;return a;
++}
++
++template<class Sink>
++ICE_HD TraceStatus emit_exit(Sink& sink,RayAudit& audit,Sum& escaped,const TraceSettings& c,
++    std::uint64_t id,const FluxRay& ray,Vec3 position,unsigned entry,unsigned exit,
++    unsigned reflections,ExitKind kind,double length) noexcept
++{
++    const double power=ray.response.power();
++    if(!finite_value(power)||power<0||(!power && ray.response.nonzero()))return TraceStatus::NumericalFailure;
++    if(power==0)return TraceStatus::Exhausted;
++    OutgoingSample s{};
++    s.position_mm=position*c.prism.circumradius_mm;s.direction=ray.direction;s.frame=ray.frame;
++    s.response=ray.response;s.power_fraction=power;s.internal_length_mm=length;
++    s.incident_sample_id=id;s.entry_face=entry;s.exit_face=exit;s.internal_reflections=reflections;s.kind=kind;
++    if(!s.position_mm.is_finite())return TraceStatus::NumericalFailure;
++    if(!sink.push(s))return TraceStatus::OutputOverflow;
++    escaped.add(power);++audit.output_count;return TraceStatus::Exhausted;
++}
++
++// Deterministic splitting, NOT a single randomly chosen path. For one convex
++// prism, exterior branches cannot re-enter it: emit exterior R once, then emit
++// T at every internal encounter and continue only internal R. Thus all retained
++// orders require a LINEAR chain, not an exponentially growing tree.
++template<class Sink>
++ICE_HD RayAudit trace_from_entry(const TraceSettings& c,std::uint64_t id,EntrySample entry,Sink& sink) noexcept
++{
++    RayAudit a{};Sum escaped{};
++    if(!settings_valid(c)||id>=c.total_incident_samples||!entry.valid||entry.face>=8)
++        return finish_audit(a,escaped,1,TraceStatus::InvalidInput);
++    if(!strict_face_point(c.prism,entry.position,entry.face))
++        return finish_audit(a,escaped,1,TraceStatus::AmbiguousBoundary);
++    if(!(c.prism.normal(entry.face).dot(c.incident_direction)<0))
++        return finish_audit(a,escaped,1,TraceStatus::InvalidInput);
++    FluxRay incident{c.incident_direction,c.incident_frame,JonesFlux::identity()};
++    auto split=split_flux(incident,c.prism.normal(entry.face),c.exterior_index,c.interior_index);
++    if(!split.valid)return finish_audit(a,escaped,1,TraceStatus::NumericalFailure);
++    a.max_interface_balance_error=::fabs(split.balance_error);
++    const auto entry_emission=emit_exit(sink,a,escaped,c,id,split.reflected,entry.position,entry.face,entry.face,
++                  0,ExitKind::ExteriorReflection,0);
++    if(entry_emission!=TraceStatus::Exhausted)
++        return finish_audit(a,escaped,1,entry_emission);
++    if(!split.has_transmission)
++    {
++        a.tir_count=1;
++        return finish_audit(a,escaped,0,TraceStatus::Exhausted);
++    }
++    FluxRay ray=split.transmitted;
++    Vec3 p=entry.position;
++    unsigned current_face=entry.face,reflections=0;
++    Sum length{};
++    for(unsigned encounter=0;encounter<c.max_internal_hits;++encounter)
++    {
++        const double power=ray.response.power();
++        if(!finite_value(power)||power<0||(!power&&ray.response.nonzero()))
++            return finish_audit(a,escaped,power,TraceStatus::NumericalFailure);
++        if(power==0)return finish_audit(a,escaped,0,TraceStatus::Exhausted);
++        if(power<=c.residual_power_tolerance)
++            return finish_audit(a,escaped,power,TraceStatus::TailToleranceReached);
++        auto hit=next_boundary(c.prism,p,ray.direction,current_face);
++        if(hit.status!=HitStatus::Regular)
++            return finish_audit(a,escaped,power,hit.status==HitStatus::AmbiguousBoundary?
++                TraceStatus::AmbiguousBoundary:TraceStatus::NumericalFailure);
++        const double segment=hit.distance*c.prism.circumradius_mm;
++        if(!finite_value(segment)||segment<0)
++            return finish_audit(a,escaped,power,TraceStatus::NumericalFailure);
++        length.add(segment);
++        if(!finite_value(length.value))return finish_audit(a,escaped,power,TraceStatus::NumericalFailure);
++        split=split_flux(ray,-c.prism.normal(hit.face),c.interior_index,c.exterior_index);
++        if(!split.valid)return finish_audit(a,escaped,power,TraceStatus::NumericalFailure);
++        ++a.internal_hits;
++        if(split.total_internal_reflection)++a.tir_count;
++        a.max_interface_balance_error=max_value(a.max_interface_balance_error,::fabs(split.balance_error));
++        if(split.has_transmission)
++        {
++            const auto emission=emit_exit(sink,a,escaped,c,id,split.transmitted,hit.position,
++                entry.face,hit.face,reflections,ExitKind::InteriorTransmission,length.value);
++            if(emission!=TraceStatus::Exhausted)return finish_audit(a,escaped,power,emission);
++        }
++        ray=split.reflected;p=hit.position;current_face=hit.face;++reflections;
++    }
++    const double remaining=ray.response.power();
++    if(!finite_value(remaining)||remaining<0||(!remaining&&ray.response.nonzero()))
++        return finish_audit(a,escaped,remaining,TraceStatus::NumericalFailure);
++    return finish_audit(a,escaped,remaining,remaining==0?TraceStatus::Exhausted:
++        (remaining<=c.residual_power_tolerance?TraceStatus::TailToleranceReached:TraceStatus::InteractionLimit));
++}
++template<class Sink>
++ICE_HD RayAudit trace_sample(const TraceSettings& c,std::uint64_t id,Sink& sink) noexcept
++{
++    const auto entry=sample_entry(c.prism,c.incident_direction,
++        sample_uniform(c.seed,id,0),sample_uniform(c.seed,id,1),sample_uniform(c.seed,id,2));
++    return trace_from_entry(c,id,entry,sink);
++}
++ICE_HD inline bool replay_equal(const RayAudit& a,const RayAudit& b) noexcept
++{
++    return a.output_count==b.output_count && a.status==b.status &&
++        a.internal_hits==b.internal_hits && a.tir_count==b.tir_count &&
++        ::fabs(a.escaped_power-b.escaped_power)<=1e-13 &&
++        ::fabs(a.unresolved_power-b.unresolved_power)<=1e-13;
++}
++static_assert(std::is_trivially_copyable_v<TraceSettings>);
++static_assert(std::is_trivially_copyable_v<OutgoingSample>);
++static_assert(std::is_trivially_copyable_v<RayAudit>);
++} // namespace iceCrystal
+diff --git a/hex_trace/include/ice_crystal/hex_trace_cuda.hpp b/hex_trace/include/ice_crystal/hex_trace_cuda.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..c0d74d53559a94fbd6bf4167bbb8bd4cb52e1da8
+--- /dev/null
++++ b/hex_trace/include/ice_crystal/hex_trace_cuda.hpp
+@@ -0,0 +1,42 @@
++#pragma once
++#include <ice_crystal/hex_trace.hpp>
++#include <rainbow/cuda_driver.hpp>
++#include <rainbow/cuda_module.hpp>
++#include <rainbow/device_buffer.hpp>
++#include <filesystem>
++
++namespace iceCrystal
++{
++// No CUDA Runtime API. Owns output storage; context is borrowed and must outlive
++// this object. Each trace() is synchronous. No automatic CPU fallback.
++class HexPrismTracer final
++{
++public:
++    explicit HexPrismTracer(const rainbow::CudaContext&);
++    ~HexPrismTracer() noexcept;
++    HexPrismTracer(const HexPrismTracer&)=delete;
++    HexPrismTracer& operator=(const HexPrismTracer&)=delete;
++    void load_module(const std::filesystem::path& fatbin);
++    void trace(const TraceSettings&,std::uint64_t first,std::size_t count,
++               std::size_t maximum_output_records=4*1024*1024);
++    [[nodiscard]] TraceBatch download() const;
++    [[nodiscard]] std::vector<RayAudit> download_audits() const;
++    // Device-resident CSR output for a later phase accumulator. Must not outlive
++    // the tracer or the next call to trace(). Addresses alone do not certify quality.
++    [[nodiscard]] const rainbow::DeviceBuffer<OutgoingSample>& outgoing() const noexcept {return outgoing_;}
++    [[nodiscard]] const rainbow::DeviceBuffer<std::uint64_t>& offsets() const noexcept {return offsets_;}
++    [[nodiscard]] const rainbow::DeviceBuffer<RayAudit>& audits() const noexcept {return audits_;}
++    [[nodiscard]] bool has_result() const noexcept {return has_result_;}
++private:
++    void synchronize();
++    void launch(const char*,void**,unsigned blocks);
++    const rainbow::CudaContext& context_;
++    rainbow::CudaModule module_;
++    rainbow::DeviceBuffer<RayAudit> audits_;
++    rainbow::DeviceBuffer<std::uint64_t> offsets_,total_;
++    rainbow::DeviceBuffer<OutgoingSample> outgoing_;
++    std::size_t count_=0;
++    std::uint64_t first_=0;
++    bool pending_=false,has_result_=false,module_ready_=false;
++};
++} // namespace iceCrystal
+diff --git a/hex_trace/include/ice_crystal/math.hpp b/hex_trace/include/ice_crystal/math.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e4ce2369a6c65fadd2bef8132c0aa2d55f7f7f3
+--- /dev/null
++++ b/hex_trace/include/ice_crystal/math.hpp
+@@ -0,0 +1,147 @@
++#pragma once
++
++#include <cmath>
++#include <cfloat>
++#include <cstdint>
++
++#if defined(__CUDACC__)
++#define ICE_HD __host__ __device__
++#else
++#define ICE_HD
++#endif
++
++namespace iceCrystal
++{
++inline constexpr double pi = 3.141592653589793238462643383279502884;
++inline constexpr double sqrt3 = 1.732050807568877293527446341505872367;
++
++ICE_HD inline bool finite_value(double x) noexcept { return x >= -DBL_MAX && x <= DBL_MAX; }
++ICE_HD inline double max_value(double a, double b) noexcept { return a > b ? a : b; }
++
++// Independent FP64 types: the existing rain-drop field and interface remain FP32
++// and retain their electric-field (not ray-flux) contract.
++struct Vec3
++{
++    double x = 0, y = 0, z = 0;
++    ICE_HD Vec3 operator+(Vec3 b) const noexcept { return {x+b.x, y+b.y, z+b.z}; }
++    ICE_HD Vec3 operator-(Vec3 b) const noexcept { return {x-b.x, y-b.y, z-b.z}; }
++    ICE_HD Vec3 operator-() const noexcept { return {-x,-y,-z}; }
++    ICE_HD Vec3 operator*(double b) const noexcept { return {x*b,y*b,z*b}; }
++    ICE_HD Vec3 operator/(double b) const noexcept { return {x/b,y/b,z/b}; }
++    ICE_HD double dot(Vec3 b) const noexcept { return x*b.x+y*b.y+z*b.z; }
++    ICE_HD Vec3 cross(Vec3 b) const noexcept
++    { return {y*b.z-z*b.y,z*b.x-x*b.z,x*b.y-y*b.x}; }
++    ICE_HD bool is_finite() const noexcept { return finite_value(x)&&finite_value(y)&&finite_value(z); }
++    ICE_HD double max_abs() const noexcept
++    { return max_value(::fabs(x),max_value(::fabs(y),::fabs(z))); }
++};
++ICE_HD inline bool normalize(Vec3 a, Vec3& result) noexcept
++{
++    const double s=a.max_abs();
++    if(!(s>0) || !finite_value(s)) return false;
++    a=a/s;
++    const double n=::sqrt(a.dot(a));
++    if(!(n>0) || !finite_value(n)) return false;
++    result=a/n;
++    return result.is_finite();
++}
++ICE_HD inline bool is_unit(Vec3 a) noexcept
++{ return a.is_finite() && ::fabs(a.dot(a)-1.0)<=128*DBL_EPSILON; }
++struct Frame
++{
++    Vec3 e0, e1;
++    ICE_HD bool valid(Vec3 k) const noexcept
++    {
++        return is_unit(k)&&is_unit(e0)&&is_unit(e1) &&
++            ::fabs(k.dot(e0))<=128*DBL_EPSILON &&
++            ::fabs(k.dot(e1))<=128*DBL_EPSILON &&
++            (k.cross(e0)-e1).max_abs()<=256*DBL_EPSILON;
++    }
++};
++ICE_HD inline bool make_frame(Vec3 k, Frame& f) noexcept
++{
++    if(!is_unit(k)) return false;
++    const double ax=::fabs(k.x),ay=::fabs(k.y),az=::fabs(k.z);
++    const Vec3 a=(ax<=ay && ax<=az)?Vec3{1,0,0}:(ay<=az?Vec3{0,1,0}:Vec3{0,0,1});
++    if(!normalize(a-k*k.dot(a),f.e0)) return false;
++    if(!normalize(k.cross(f.e0),f.e1)) return false;
++    return f.valid(k);
++}
++struct Complex
++{
++    double re=0, im=0;
++    ICE_HD Complex operator+(Complex b) const noexcept { return {re+b.re,im+b.im}; }
++    ICE_HD Complex operator*(double b) const noexcept { return {re*b,im*b}; }
++    ICE_HD Complex operator*(Complex b) const noexcept
++    { return {re*b.re-im*b.im,re*b.im+im*b.re}; }
++    ICE_HD double norm2() const noexcept { return re*re+im*im; }
++};
++struct Field { Complex x,y; };
++struct JonesFlux
++{
++    // Columns: responses to the same two orthogonal unit incident fields.
++    // Rows: components in the current transverse frame. NOT a single Jones
++    // vector purporting to represent unpolarized light.
++    Field column[2]{};
++    ICE_HD static JonesFlux identity() noexcept
++    {
++        JonesFlux j{}; j.column[0].x.re=1; j.column[1].y.re=1; return j;
++    }
++    ICE_HD double power() const noexcept
++    {
++        return 0.5*(column[0].x.norm2()+column[0].y.norm2()+
++                    column[1].x.norm2()+column[1].y.norm2());
++    }
++    ICE_HD bool is_finite() const noexcept
++    {
++        for(unsigned i=0;i<2;++i)
++            if(!finite_value(column[i].x.re)||!finite_value(column[i].x.im)||
++               !finite_value(column[i].y.re)||!finite_value(column[i].y.im)) return false;
++        return true;
++    }
++    ICE_HD bool nonzero() const noexcept
++    {
++        for(unsigned i=0;i<2;++i)
++            if(column[i].x.re!=0 || column[i].x.im!=0 ||
++               column[i].y.re!=0 || column[i].y.im!=0) return true;
++        return false;
++    }
++};
++ICE_HD inline JonesFlux change_frame(const JonesFlux& j, Frame old, Frame next) noexcept
++{
++    JonesFlux r{};
++    for(unsigned c=0;c<2;++c)
++    {
++        r.column[c].x=j.column[c].x*old.e0.dot(next.e0)+j.column[c].y*old.e1.dot(next.e0);
++        r.column[c].y=j.column[c].x*old.e0.dot(next.e1)+j.column[c].y*old.e1.dot(next.e1);
++    }
++    return r;
++}
++ICE_HD inline JonesFlux scale_rows(JonesFlux j, Complex s, Complex p) noexcept
++{
++    for(unsigned c=0;c<2;++c) { j.column[c].x=j.column[c].x*s; j.column[c].y=j.column[c].y*p; }
++    return j;
++}
++struct Sum
++{
++    double value=0, correction=0;
++    ICE_HD void add(double x) noexcept
++    {
++        const double y=x-correction,t=value+y;
++        correction=(t-value)-y; value=t;
++    }
++};
++// Stateless, reproducible counter scrambling. Midpoints of 2^52 cells in (0,1).
++// This is an input quadrature/MC source, not an optical approximation.
++ICE_HD inline std::uint64_t mix64(std::uint64_t x) noexcept
++{
++    x=(x^(x>>30))*UINT64_C(0xbf58476d1ce4e5b9);
++    x=(x^(x>>27))*UINT64_C(0x94d049bb133111eb);
++    return x^(x>>31);
++}
++ICE_HD inline double sample_uniform(std::uint64_t seed,std::uint64_t id,unsigned dimension) noexcept
++{
++    const auto x=mix64(seed+UINT64_C(0x9e3779b97f4a7c15)*(3*id+dimension+1));
++    return (double(x>>12)+0.5)*0x1p-52;
++}
++} // namespace iceCrystal
+diff --git a/hex_trace/src/hex_trace.cpp b/hex_trace/src/hex_trace.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..9e2a5368834cfbc871bdb5e289d3ce6abd09f1ea
+--- /dev/null
++++ b/hex_trace/src/hex_trace.cpp
+@@ -0,0 +1,105 @@
++#include <ice_crystal/hex_trace.hpp>
++#include <algorithm>
++#include <limits>
++#include <stdexcept>
++#include <string>
++
++namespace iceCrystal
++{
++void validate_settings(const TraceSettings& s)
++{
++    if(!settings_valid(s))throw std::invalid_argument("Invalid hex trace geometry, direction/frame, indices, sample count or termination policy.");
++    const double area=s.prism.projected_area_mm2(s.incident_direction);
++    if(!(area/double(s.total_incident_samples)>0))
++        throw std::invalid_argument("Per-incident-sample area underflows FP64.");
++}
++TraceSettings make_trace_settings(HexPrism p,Vec3 incident,double ni,double nt,
++    std::uint64_t total,std::uint64_t seed,std::uint32_t max_hits,double tail)
++{
++    TraceSettings s{};s.prism=p;
++    if(!normalize(incident,s.incident_direction)||!make_frame(s.incident_direction,s.incident_frame))
++        throw std::invalid_argument("Incident direction must be finite and nonzero.");
++    s.exterior_index=ni;s.interior_index=nt;s.total_incident_samples=total;s.seed=seed;
++    s.max_internal_hits=max_hits;s.residual_power_tolerance=tail;validate_settings(s);return s;
++}
++void validate_batch_range(const TraceSettings& s,std::uint64_t first,std::size_t n)
++{
++    validate_settings(s);
++    if(n==0||first>=s.total_incident_samples||n>s.total_incident_samples-first)
++        throw std::invalid_argument("Batch is outside the global incident-sample range.");
++    if(n==(std::numeric_limits<std::size_t>::max)())throw std::length_error("Batch offset-array size overflow.");
++}
++const char* status_name(TraceStatus s) noexcept
++{
++    switch(s)
++    {
++    case TraceStatus::Exhausted:return "exhausted";
++    case TraceStatus::TailToleranceReached:return "tail_tolerance_reached";
++    case TraceStatus::InteractionLimit:return "interaction_limit";
++    case TraceStatus::AmbiguousBoundary:return "ambiguous_boundary";
++    case TraceStatus::InvalidInput:return "invalid_input";
++    case TraceStatus::NumericalFailure:return "numerical_failure";
++    case TraceStatus::OutputOverflow:return "output_overflow";
++    case TraceStatus::ReplayMismatch:return "replay_mismatch";
++    }
++    return "unknown";
++}
++TraceBatch trace_batch_cpu(const TraceSettings& s,std::uint64_t first,std::size_t n,std::size_t max_records)
++{
++    validate_batch_range(s,first,n);
++    TraceBatch b{};b.first_sample=first;b.audits.resize(n);b.offsets.resize(n+1);
++    for(std::size_t i=0;i<n;++i)
++    {
++        CountSink sink{};b.audits[i]=trace_sample(s,first+i,sink);
++        const auto count=b.audits[i].output_count;
++        if(count>max_records-b.offsets[i])throw std::length_error("Output memory budget exceeded; batch not silently reduced.");
++        b.offsets[i+1]=b.offsets[i]+count;
++    }
++    if(b.offsets.back()>(std::numeric_limits<std::size_t>::max)()/sizeof(OutgoingSample))
++        throw std::length_error("Outgoing byte count overflow.");
++    b.outgoing.resize(static_cast<std::size_t>(b.offsets.back()));
++    for(std::size_t i=0;i<n;++i)
++    {
++        auto count=b.offsets[i+1]-b.offsets[i];
++        auto* data=count?b.outgoing.data()+b.offsets[i]:nullptr;
++        BufferSink sink{data,count,0};
++        const auto audit=trace_sample(s,first+i,sink);
++        if(!replay_equal(b.audits[i],audit)||sink.size!=count)
++            b.audits[i].status=TraceStatus::ReplayMismatch;
++    }
++    return b;
++}
++TraceSummary summarize(std::span<const RayAudit> audits,double tolerance)
++{
++    if(!finite_value(tolerance)||tolerance<0)throw std::invalid_argument("Invalid balance tolerance.");
++    TraceSummary s{};Sum escaped{},tail{};
++    for(const auto& a:audits)
++    {
++        const auto status=static_cast<unsigned>(a.status);
++        if(status>=8)throw std::runtime_error("Unknown audit status / incompatible device module.");
++        ++s.rays;s.outputs+=a.output_count;++s.status_counts[status];
++        escaped.add(a.escaped_power);tail.add(a.unresolved_power);
++        s.maximum_balance_error=(std::max)(s.maximum_balance_error,::fabs(a.balance_error));
++        s.maximum_interface_balance_error=(std::max)(s.maximum_interface_balance_error,a.max_interface_balance_error);
++        s.accepted=s.accepted && accepted_status(a.status) && finite_value(a.escaped_power)&&finite_value(a.unresolved_power)&&
++            a.escaped_power>=0&&a.unresolved_power>=0&&finite_value(a.balance_error)&&::fabs(a.balance_error)<=tolerance;
++    }
++    s.escaped_power_sum=escaped.value;s.unresolved_power_sum=tail.value;return s;
++}
++void merge_summary(TraceSummary& d,const TraceSummary& s)
++{
++    if(s.rays>(std::numeric_limits<std::uint64_t>::max)()-d.rays ||
++       s.outputs>(std::numeric_limits<std::uint64_t>::max)()-d.outputs)
++        throw std::overflow_error("Summary count overflow.");
++    d.rays+=s.rays;d.outputs+=s.outputs;
++    for(unsigned i=0;i<8;++i)d.status_counts[i]+=s.status_counts[i];
++    d.escaped_power_sum+=s.escaped_power_sum;d.unresolved_power_sum+=s.unresolved_power_sum;
++    d.maximum_balance_error=(std::max)(d.maximum_balance_error,s.maximum_balance_error);
++    d.maximum_interface_balance_error=(std::max)(d.maximum_interface_balance_error,s.maximum_interface_balance_error);
++    d.accepted=d.accepted&&s.accepted;
++}
++void require_accepted(const TraceSummary& s)
++{
++    if(!s.rays||!s.accepted)throw std::runtime_error("Hex trace is NOT accepted. Inspect per-ray statuses and unresolved power; do not renormalize it away.");
++}
++} // namespace iceCrystal
+diff --git a/hex_trace/src/hex_trace_cuda.cpp b/hex_trace/src/hex_trace_cuda.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0f9b5ababf954f620907e975be1295f8c07d36f0
+--- /dev/null
++++ b/hex_trace/src/hex_trace_cuda.cpp
+@@ -0,0 +1,82 @@
++#include <ice_crystal/hex_trace_cuda.hpp>
++#include <rainbow/cuda_error.hpp>
++#include <algorithm>
++#include <array>
++#include <limits>
++#include <stdexcept>
++
++namespace iceCrystal
++{
++HexPrismTracer::HexPrismTracer(const rainbow::CudaContext& c)
++    :context_(c),module_(c),audits_(c),offsets_(c),total_(c),outgoing_(c) {}
++HexPrismTracer::~HexPrismTracer() noexcept
++{
++    if(pending_)
++    {
++        static_cast<void>(rainbow::detail::report_cuda_cleanup_result(
++            cuCtxSetCurrent(context_.handle()),"hex tracer cleanup context"));
++        static_cast<void>(rainbow::detail::report_cuda_cleanup_result(
++            cuStreamSynchronize(context_.stream()),"hex tracer cleanup stream"));
++    }
++}
++void HexPrismTracer::synchronize()
++{
++    context_.make_current();RAINBOW_CUDA_CHECK(cuStreamSynchronize(context_.stream()));pending_=false;
++}
++void HexPrismTracer::launch(const char* name,void** args,unsigned blocks)
++{
++    context_.make_current();const auto f=module_.find_function(name);pending_=true;
++    RAINBOW_CUDA_CHECK(cuLaunchKernel(f,blocks,1,1,128,1,1,0,context_.stream(),args,nullptr));
++}
++void HexPrismTracer::load_module(const std::filesystem::path& path)
++{
++    module_ready_=false;
++    module_.load_fatbin(path);
++    static_cast<void>(module_.find_function("ice_hex_trace_count"));
++    static_cast<void>(module_.find_function("ice_hex_trace_offsets"));
++    static_cast<void>(module_.find_function("ice_hex_trace_write"));
++    // Use member-owned memory so even a failed launch/sync has a safe lifetime.
++    total_.allocate(4);auto* ptr=total_.data();void* args[]={&ptr};
++    launch("ice_hex_trace_abi_v1",args,1);synchronize();
++    std::array<std::uint64_t,4> abi{};total_.download(abi);total_.close();
++    const std::array<std::uint64_t,4> expected{
++        UINT64_C(0x4943454845580001),sizeof(TraceSettings),sizeof(RayAudit),sizeof(OutgoingSample)};
++    if(abi!=expected)throw std::runtime_error("Hex trace fatbin ABI mismatch; rebuild/stage the module.");
++    module_ready_=true;
++}
++void HexPrismTracer::trace(const TraceSettings& config,std::uint64_t first,std::size_t count,std::size_t max_records)
++{
++    has_result_=false;validate_batch_range(config,first,count);
++    if(!module_ready_)throw std::logic_error("Hex trace module not loaded.");
++    synchronize();audits_.close();offsets_.close();total_.close();outgoing_.close();
++    audits_.allocate(count);offsets_.allocate(count+1);total_.allocate(1);
++    auto s=config;const auto n=static_cast<std::uint64_t>(count);
++    auto* a=audits_.data();auto* o=offsets_.data();auto* t=total_.data();
++    auto first_arg=first,n_arg=n;
++    void* count_args[]={&s,&first_arg,&n_arg,&a};
++    const auto blocks=static_cast<unsigned>((std::min)(std::uint64_t{4096},n/128+(n%128!=0)));
++    launch("ice_hex_trace_count",count_args,blocks);
++    void* prefix_args[]={&a,&n_arg,&o,&t};launch("ice_hex_trace_offsets",prefix_args,1);synchronize();
++    std::uint64_t output_count=0;total_.download({&output_count,1});
++    if(output_count>max_records || output_count>(std::numeric_limits<std::size_t>::max)()/sizeof(OutgoingSample))
++        throw std::length_error("Hex output memory budget/size exceeded; no automatic sample reduction.");
++    outgoing_.allocate(static_cast<std::size_t>(output_count));
++    pending_=true;outgoing_.zero_byte_async(context_.stream());
++    auto* output=outgoing_.data();
++    void* write_args[]={&s,&first_arg,&n_arg,&o,&output,&a};
++    launch("ice_hex_trace_write",write_args,blocks);synchronize();
++    count_=count;first_=first;has_result_=true;
++}
++std::vector<RayAudit> HexPrismTracer::download_audits() const
++{
++    if(!has_result_)throw std::logic_error("No completed hex trace buffers.");
++    std::vector<RayAudit> a(count_);audits_.download(a);return a;
++}
++TraceBatch HexPrismTracer::download() const
++{
++    if(!has_result_)throw std::logic_error("No completed hex trace buffers.");
++    TraceBatch b{};b.first_sample=first_;b.audits=download_audits();
++    b.offsets.resize(count_+1);offsets_.download(b.offsets);
++    b.outgoing.resize(outgoing_.element_count());outgoing_.download(b.outgoing);return b;
++}
++} // namespace iceCrystal
+diff --git a/hex_trace/tests/cli_test.py b/hex_trace/tests/cli_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..7474fad02009c4679ad5ce2cddd999e88f8a76ea
+--- /dev/null
++++ b/hex_trace/tests/cli_test.py
+@@ -0,0 +1,46 @@
++"""CLI contract tests; standard library only. No GPU or optical GT claimed."""
++import csv
++import json
++import pathlib
++import subprocess
++import sys
++import tempfile
++
++exe = pathlib.Path(sys.argv[1]).resolve()
++with tempfile.TemporaryDirectory(prefix="ice_hex_cli_") as tmp:
++    root = pathlib.Path(tmp)
++    common = [str(exe), "--radius-mm", "0.1", "--length-mm", "0.2",
++              "--ki", "0", "-1", "0", "--ior", "1.31",
++              "--wavelength-nm", "550", "--samples", "17", "--batch-size", "5"]
++    def invoke(extra, expected):
++        p = subprocess.run(common + extra, capture_output=True, text=True)
++        assert p.returncode == expected, (p.returncode, p.stdout, p.stderr)
++        return p
++    directory = root / "accepted"
++    p = invoke(["--out", str(directory)], 0)
++    m = json.loads((directory / "trace_metadata.json").read_text())
++    assert m["complete"] and m["quality_accepted"] and not m["phase_cdf_record"]
++    assert not m["renormalized_to_escaped_power"]
++    assert m["processed_samples"] == 17
++    rows = list(csv.DictReader((directory / "outgoing.csv").open()))
++    assert len(rows) == m["outgoing_count"]
++    recovered = sum(float(r["weight_mm2"]) for r in rows)
++    expected = m["projected_area_mm2"] * m["escaped_power_sum"] / 17
++    assert abs(recovered - expected) < 1e-14
++    for r in rows:
++        power = 0.5 * sum(float(r[k]) ** 2 for k in (
++            "j00_re", "j00_im", "j10_re", "j10_im", "j01_re", "j01_im", "j11_re", "j11_im"))
++        assert abs(power - float(r["power_fraction"])) < 2e-14
++    invoke(["--out", str(directory)], 1)  # no overwrite
++    bad = root / "rejected"
++    invoke(["--out", str(bad), "--max-internal-hits", "1"], 2)
++    assert not bad.exists()
++    bad_meta = json.loads((root / "rejected.part" / "trace_metadata.json").read_text())
++    assert not bad_meta["complete"] and not bad_meta["quality_accepted"]
++    assert bad_meta["status_counts"]["interaction_limit"] > 0
++    invoke(["--out", str(root / "invalid"), "--tail-tolerance", "1"], 1)
++    invoke(["--out", str(root / "cuda"), "--backend", "cuda"], 1)  # CPU exe never falls back
++    invoke(["--out", str(root / "duplicate"), "--ior", "1.31"], 1)
++    assert not (root / "invalid.part").exists()
++    print("PASS CLI: accepted output, CSV Jones/area weights, refused overwrite, rejected tail, invalid/duplicate input, no CUDA fallback")
++    print(p.stdout.strip())
+diff --git a/hex_trace/tests/hex_trace_cuda_tests.cpp b/hex_trace/tests/hex_trace_cuda_tests.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f66a5cbf55550cddf1709e4a640557781a4138e
+--- /dev/null
++++ b/hex_trace/tests/hex_trace_cuda_tests.cpp
+@@ -0,0 +1,72 @@
++#include <ice_crystal/hex_trace_cuda.hpp>
++#include <filesystem>
++#include <iostream>
++#include <stdexcept>
++#include <string>
++#include <vector>
++#include <cmath>
++
++using namespace iceCrystal;
++namespace
++{
++void check(bool b,const char* m){if(!b)throw std::runtime_error(m);}
++void near(double a,double b,double t,const char* m)
++{check(finite_value(a)&&finite_value(b)&&::fabs(a-b)<=t,m);}
++void vector_near(Vec3 a,Vec3 b,double t,const char* m)
++{check((a-b).max_abs()<=t,m);}
++void compare(const TraceBatch& cpu,const TraceBatch& gpu)
++{
++    check(cpu.offsets==gpu.offsets,"CPU/CUDA CSR offset mismatch");
++    check(cpu.audits.size()==gpu.audits.size(),"CPU/CUDA audit count");
++    for(std::size_t i=0;i<cpu.audits.size();++i)
++    {
++        const auto& a=cpu.audits[i];const auto& b=gpu.audits[i];
++        check(a.status==b.status&&a.output_count==b.output_count&&a.tir_count==b.tir_count&&a.internal_hits==b.internal_hits,"CPU/CUDA status/path topology");
++        near(a.escaped_power,b.escaped_power,5e-12,"CPU/CUDA escaped power");
++        near(a.unresolved_power,b.unresolved_power,5e-12,"CPU/CUDA unresolved power");
++    }
++    check(cpu.outgoing.size()==gpu.outgoing.size(),"CPU/CUDA outgoing count");
++    for(std::size_t i=0;i<cpu.outgoing.size();++i)
++    {
++        const auto& a=cpu.outgoing[i];const auto& b=gpu.outgoing[i];
++        check(a.incident_sample_id==b.incident_sample_id&&a.kind==b.kind&&a.entry_face==b.entry_face&&
++              a.exit_face==b.exit_face&&a.internal_reflections==b.internal_reflections,"CPU/CUDA output topology");
++        near(a.power_fraction,b.power_fraction,5e-12,"CPU/CUDA sample power");
++        vector_near(a.direction,b.direction,5e-12,"CPU/CUDA direction");
++        vector_near(a.position_mm,b.position_mm,5e-10,"CPU/CUDA position");
++        vector_near(a.frame.e0,b.frame.e0,5e-12,"CPU/CUDA e0");
++        vector_near(a.frame.e1,b.frame.e1,5e-12,"CPU/CUDA e1");
++        near(a.internal_length_mm,b.internal_length_mm,5e-9,"CPU/CUDA path length");
++        for(unsigned c=0;c<2;++c)
++        {
++            near(a.response.column[c].x.re,b.response.column[c].x.re,5e-12,"CPU/CUDA J real");
++            near(a.response.column[c].x.im,b.response.column[c].x.im,5e-12,"CPU/CUDA J imag");
++            near(a.response.column[c].y.re,b.response.column[c].y.re,5e-12,"CPU/CUDA J real");
++            near(a.response.column[c].y.im,b.response.column[c].y.im,5e-12,"CPU/CUDA J imag");
++        }
++    }
++}
++}
++int main(int argc,char** argv)
++{
++    try
++    {
++        const auto module=argc==2?std::filesystem::path(argv[1]):
++            std::filesystem::absolute(argv[0]).parent_path()/"modules"/"hex_trace.fatbin";
++        rainbow::CudaContext context(0);HexPrismTracer tracer(context);tracer.load_module(module);
++        for(const auto k:std::vector<Vec3>{{0,-1,0},{1,0,0},{1,-0.4,0.3},{0.17,0.84,-0.33}})
++        {
++            auto s=make_trace_settings({1,2},k,1,1.31,1024,12345,256,1e-12);
++            auto cpu=trace_batch_cpu(s,0,1024);tracer.trace(s,0,1024);auto gpu=tracer.download();
++            require_accepted(summarize(cpu.audits));require_accepted(summarize(gpu.audits));compare(cpu,gpu);
++        }
++        auto limited=make_trace_settings({1,2},{0,-1,0},1,1.31,512,7,1,1e-12);
++        auto cpu=trace_batch_cpu(limited,17,333);tracer.trace(limited,17,333);auto gpu=tracer.download();
++        check(!summarize(gpu.audits).accepted,"CUDA truncation wrongly accepted");compare(cpu,gpu);
++        auto matched=limited;matched.interior_index=1;matched.max_internal_hits=256;matched.residual_power_tolerance=0;
++        cpu=trace_batch_cpu(matched,0,512);tracer.trace(matched,0,512);gpu=tracer.download();
++        require_accepted(summarize(gpu.audits));compare(cpu,gpu);
++        std::cout<<"PASS CUDA: six configurations, CPU comparison including Jones entries, offsets and failures\n";return 0;
++    }
++    catch(const std::exception& e){std::cerr<<"CUDA test FAILED (not skipped): "<<e.what()<<'\n';return 1;}
++}
+diff --git a/hex_trace/tests/hex_trace_tests.cpp b/hex_trace/tests/hex_trace_tests.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..213fe3caedef03a676f2b767872059bc77634789
+--- /dev/null
++++ b/hex_trace/tests/hex_trace_tests.cpp
+@@ -0,0 +1,338 @@
++#include <ice_crystal/hex_trace.hpp>
++#include <algorithm>
++#include <array>
++#include <functional>
++#include <iomanip>
++#include <iostream>
++#include <limits>
++#include <stdexcept>
++#include <string>
++
++using namespace iceCrystal;
++namespace
++{
++void check(bool b,const char* m){if(!b)throw std::runtime_error(m);}
++void near(double a,double b,double t,const char* message)
++{
++    if(!finite_value(a)||!finite_value(b)||::fabs(a-b)>t)
++        throw std::runtime_error(std::string(message)+": "+std::to_string(a)+" vs "+std::to_string(b));
++}
++Vec3 unit(Vec3 v){Vec3 r{};check(normalize(v,r),"normalize");return r;}
++void near_vec(Vec3 a,Vec3 b,double t,const char* m){check((a-b).max_abs()<=t,m);}
++TraceSettings config(Vec3 k={0,-1,0},std::uint64_t n=1024,unsigned hits=256,double tol=1e-12)
++{return make_trace_settings({1,2},k,1,1.31,n,12345,hits,tol);}
++template<class F> void rejects(F f)
++{bool rejected=false;try{f();}catch(const std::exception&){rejected=true;}check(rejected,"input not rejected");}
++Vec3 rotate60(Vec3 p){return {0.5*p.x-sqrt3/2*p.z,p.y,sqrt3/2*p.x+0.5*p.z};}
++
++void projection()
++{
++    const HexPrism h{1,2};
++    near(h.projected_area_mm2({0,1,0}),3*sqrt3/2,1e-14,"axial area");
++    near(h.projected_area_mm2({1,0,0}),4,1e-14,"side area");
++    Sum areas{};
++    constexpr unsigned n=100000;
++    for(unsigned i=0;i<n;++i)
++    {
++        const double y=1-2*(i+0.5)/n,phi=2*pi*i*0.6180339887498948482;
++        const double r=::sqrt((1-y)*(1+y));Vec3 k{r*::cos(phi),y,r*::sin(phi)};
++        const double a=h.projected_area_mm2(k);
++        near(a,h.projected_area_mm2(-k),5e-14,"central symmetry of projected area");
++        near(a,h.projected_area_mm2(rotate60(k)),5e-14,"60 degree symmetry of area");
++        areas.add(a);
++    }
++    near(areas.value/n,h.surface_area_mm2()/4,2e-5,"Cauchy mean projected area");
++}
++// Independent Moller-Trumbore mesh oracle. Only test code uses triangles;
++// production prism intersections do not use a mesh or BVH.
++bool triangle_hit(Vec3 p,Vec3 d,Vec3 a,Vec3 b,Vec3 c,double& t)
++{
++    Vec3 e1=b-a,e2=c-a,h=d.cross(e2);double det=e1.dot(h);
++    if(::fabs(det)<1e-13)return false;
++    Vec3 s=p-a;double u=s.dot(h)/det;if(u<0||u>1)return false;
++    Vec3 q=s.cross(e1);double v=d.dot(q)/det;if(v<0||u+v>1)return false;
++    t=e2.dot(q)/det;return t>=0;
++}
++void intersection_mesh()
++{
++    const HexPrism h{1,2};
++    std::vector<std::array<Vec3,3>> triangles;
++    for(unsigned f=0;f<6;++f)
++    {
++        Vec3 a=h.vertex(f),b=h.vertex(f+1);a.y=1;b.y=1;
++        Vec3 c=a,d=b;c.y=-1;d.y=-1;
++        triangles.push_back({a,b,c});triangles.push_back({b,d,c});
++        triangles.push_back({Vec3{0,1,0},a,b});triangles.push_back({Vec3{0,-1,0},c,d});
++    }
++    double largest=0;
++    for(unsigned i=0;i<10000;++i)
++    {
++        Vec3 p{6*sample_uniform(47,i,0)-3,6*sample_uniform(47,i,1)-3,6*sample_uniform(47,i,2)-3};
++        Vec3 d=unit(Vec3{sample_uniform(49,i,0)-0.5,sample_uniform(49,i,1)-0.5,sample_uniform(49,i,2)-0.5});
++        double best=DBL_MAX;
++        for(const auto& v:triangles){double t=0;if(triangle_hit(p,d,v[0],v[1],v[2],t))best=(std::min)(best,t);}
++        const auto hit=intersect_prism(h,p,d);
++        if(best==DBL_MAX){check(hit.status==HitStatus::Miss,"mesh/clipping miss disagreement");continue;}
++        check(hit.status==HitStatus::Regular,"unexpected ambiguous random hit");
++        near(hit.distance,best,2e-12,"mesh/clipping distance");
++        largest=(std::max)(largest,::fabs(hit.distance-best));
++    }
++    std::cout<<"  maximum_mesh_distance_error="<<largest<<'\n';
++    auto edge=intersect_prism(h,{3,0,0},unit({-1,0,0}));
++    check(edge.status==HitStatus::Regular,"face hit");
++    edge=intersect_prism(h,{0,0,3},{0,0,-1});
++    check(edge.status==HitStatus::AmbiguousBoundary,"vertex normal must be ambiguous");
++}
++void entry_sampling()
++{
++    auto c=config(unit({1,-0.7,0.22}));const auto& h=c.prism;const auto k=c.incident_direction;
++    constexpr unsigned n=100000;std::uint64_t counts[8]{};Sum radial{};
++    for(unsigned i=0;i<n;++i)
++    {
++        const double u0=sample_uniform(55,i,0),u1=sample_uniform(55,i,1),u2=sample_uniform(55,i,2);
++        const auto s=sample_entry(h,k,u0,u1,u2);
++        check(s.valid&&strict_face_point(h,s.position,s.face),"sample outside strict face");++counts[s.face];
++        const auto hit=intersect_prism(h,s.position-k*6,k);
++        check(hit.status==HitStatus::Regular&&hit.face==s.face,"first hit not sampled face");
++        near_vec(hit.position,s.position,2e-12,"first-hit point mismatch");
++        const auto cap=sample_entry(h,{0,-1,0},u0,u1,u2);
++        check(cap.face==6,"cap selector");radial.add(cap.position.x*cap.position.x+cap.position.z*cap.position.z);
++    }
++    const double a=h.projected_area_mm2(k);
++    for(unsigned f=0;f<8;++f)
++    {
++        const double p=h.face_area_mm2(f)*max_value(0,-h.normal(f).dot(k))/a;
++        near(double(counts[f]),n*p,7*::sqrt(n*p*(1-p))+3,"projected face frequencies");
++    }
++    near(radial.value/n,5.0/12,0.004,"uniform hexagonal cap second moment");
++    for(unsigned i=0;i<10000;++i)
++        for(unsigned j=0;j<3;++j)check(sample_uniform(0,i,j)>0&&sample_uniform(0,i,j)<1,"open RNG");
++}
++FluxRay plane_ray(double angle)
++{
++    FluxRay r{};r.direction={::sin(angle),-::cos(angle),0};r.frame={{0,0,1},r.direction.cross({0,0,1})};
++    r.response=JonesFlux::identity();return r;
++}
++void fresnel()
++{
++    auto r=plane_ray(0);const auto normal=Vec3{0,1,0};
++    const double R=(1-1.31)*(1-1.31)/((1+1.31)*(1+1.31));
++    auto b=split_flux(r,normal,1,1.31);check(b.valid&&b.has_transmission,"normal Fresnel");
++    near(b.reflected.response.power(),R,2e-15,"normal R");
++    near(b.transmitted.response.power(),1-R,2e-15,"normal T power factor");
++    double worst=0;
++    for(unsigned i=0;i<10000;++i)
++    {
++        const double angle=(i+0.5)/10000*pi/2;
++        for(unsigned reverse=0;reverse<2;++reverse)
++        {
++            const double ni=reverse?1.31:1,nt=reverse?1:1.31;
++            auto incoming=plane_ray(angle);auto out=split_flux(incoming,normal,ni,nt);
++            check(out.valid,"interface rejected in angle sweep");
++            const double total=out.reflected.response.power()+(out.has_transmission?out.transmitted.response.power():0);
++            near(total,1,2e-13,"interface energy conservation");
++            worst=(std::max)(worst,::fabs(total-1));
++            if(out.has_transmission)
++                near(ni*::sin(angle),nt*out.transmitted.direction.x,3e-14,"Snell tangent");
++        }
++    }
++    auto brewster=plane_ray(::atan(1.31));brewster.response={};brewster.response.column[0].y.re=::sqrt(2.0);
++    b=split_flux(brewster,normal,1,1.31);
++    check(b.valid,"Brewster interface");check(b.reflected.response.power()<1e-28,"Brewster p reflection");
++    auto tir=plane_ray(70*pi/180);b=split_flux(tir,normal,1.31,1);
++    check(b.valid&&b.total_internal_reflection&&!b.has_transmission,"TIR branch");
++    near(b.reflected.response.power(),1,2e-14,"TIR norm");
++    check(::fabs(b.reflected.response.column[0].x.im)>0.1,"TIR complex phase retained");
++    const auto phase_s=b.reflected.response.column[0].x,phase_p=b.reflected.response.column[1].y;
++    check(::fabs(phase_s.re*phase_p.im-phase_s.im*phase_p.re)>0.01,"TIR relative retardance retained");
++    std::cout<<"  maximum_interface_power_error="<<worst<<'\n';
++}
++void polarization_history()
++{
++    auto in=plane_ray(55*pi/180);
++    auto b1=split_flux(in,{0,1,0},1,1.31);
++    auto b2=split_flux(b1.transmitted,{0,1,0},1.31,1);
++    check(b1.valid&&b2.valid,"two-surface chain");
++    const double ts=b1.transmitted.response.column[0].x.norm2();
++    const double tp=b1.transmitted.response.column[1].y.norm2();
++    near(b2.transmitted.response.power(),0.5*(ts*ts+tp*tp),1e-14,"polarization correlation through slab");
++    const double reset_every_surface=0.25*(ts+tp)*(ts+tp);
++    check(::fabs(b2.transmitted.response.power()-reset_every_surface)>1e-4,"not reset to unpolarized at every interface");
++    const double angle=0.43;
++    Frame turned{in.frame.e0*::cos(angle)+in.frame.e1*::sin(angle),
++                 in.frame.e1*::cos(angle)-in.frame.e0*::sin(angle)};
++    auto other=in;other.response=change_frame(in.response,in.frame,turned);other.frame=turned;
++    auto b3=split_flux(other,{0,1,0},1,1.31);
++    near(b3.transmitted.response.power(),b1.transmitted.response.power(),2e-14,"basis covariance");
++}
++void slab_and_tail()
++{
++    auto c=config({0,-1,0},10,2,1e-15);
++    const double R=(1-1.31)*(1-1.31)/((1+1.31)*(1+1.31));
++    auto batch=trace_batch_cpu(c,0,10);const auto s=summarize(batch.audits);
++    check(!s.accepted&&s.status_counts[2]==10,"truncated rays must not pass");
++    for(unsigned i=0;i<10;++i)
++    {
++        const auto& a=batch.audits[i];check(a.output_count==3,"R + two transmitted exits");
++        near(a.escaped_power,R+(1-R)*(1-R)*(1+R),3e-14,"analytic slab escaped");
++        near(a.unresolved_power,(1-R)*R*R,3e-15,"analytic slab residual");
++        near(a.balance_error,0,3e-14,"slab total");
++        const auto& direct=batch.outgoing[batch.offsets[i]+1];
++        near(direct.internal_length_mm,2,1e-14,"direct slab length");
++        near_vec(direct.direction,{0,-1,0},2e-14,"forward delta retained");
++    }
++    rejects([&]{require_accepted(s);});
++    c.max_internal_hits=256;c.residual_power_tolerance=1e-12;
++    batch=trace_batch_cpu(c,0,10);require_accepted(summarize(batch.audits));
++    for(const auto& a:batch.audits)check(a.unresolved_power<=c.residual_power_tolerance,"tail bound");
++    c.interior_index=1;c.residual_power_tolerance=0;
++    batch=trace_batch_cpu(c,0,10);require_accepted(summarize(batch.audits));
++    for(const auto& a:batch.audits){check(a.output_count==1,"index-matched event count");near(a.escaped_power,1,1e-15,"index matched power");}
++}
++void prism_trace_and_batch()
++{
++    auto c=config(unit({1,-0.4,0.3}),2048);
++    auto batch=trace_batch_cpu(c,0,2048);auto sum=summarize(batch.audits);require_accepted(sum);
++    double max_error=0;
++    for(std::size_t i=0;i<batch.audits.size();++i)
++    {
++        Sum power{};
++        for(auto j=batch.offsets[i];j<batch.offsets[i+1];++j)
++        {
++            const auto& o=batch.outgoing[j];power.add(o.power_fraction);
++            check(o.frame.valid(o.direction),"output frame");
++            check(o.exit_face<8&&o.entry_face<8,"output faces");
++            check(c.prism.normal(o.exit_face).dot(o.direction)>=-1e-14,"outgoing ray points inward");
++            near(o.power_fraction,o.response.power(),2e-14,"Jones/weight consistency");
++            check(strict_face_point(c.prism,o.position_mm/c.prism.circumradius_mm,o.exit_face),"exit on facet");
++        }
++        near(power.value,batch.audits[i].escaped_power,1e-14,"event sum audit");
++        max_error=(std::max)(max_error,::fabs(batch.audits[i].balance_error));
++    }
++    auto a=trace_batch_cpu(c,0,333),b=trace_batch_cpu(c,333,2048-333);
++    check(a.outgoing.size()+b.outgoing.size()==batch.outgoing.size(),"batch-invariant output count");
++    for(std::size_t i=0;i<b.outgoing.size();++i)
++    {
++        const auto& u=b.outgoing[i];const auto& v=batch.outgoing[a.outgoing.size()+i];
++        check(u.power_fraction==v.power_fraction&&u.incident_sample_id==v.incident_sample_id,"batch-invariant sample");
++        near_vec(u.direction,v.direction,0,"batch-invariant direction");
++    }
++    std::cout<<"  oblique_outputs="<<sum.outputs<<" maximum_ray_balance_error="<<max_error
++        <<" mean_unresolved="<<sum.unresolved_power_sum/sum.rays<<'\n';
++}
++void symmetry_and_scale()
++{
++    auto c=config(unit({1,-0.4,0.3}),100);auto d=c;d.incident_direction=rotate60(c.incident_direction);
++    check(make_frame(d.incident_direction,d.incident_frame),"rotated frame");
++    for(unsigned i=0;i<100;++i)
++    {
++        auto entry=sample_entry(c.prism,c.incident_direction,sample_uniform(43,i,0),sample_uniform(43,i,1),sample_uniform(43,i,2));
++        auto rotated=entry;rotated.position=rotate60(entry.position);
++        if(rotated.face<6)rotated.face=(rotated.face+1)%6;
++        std::array<OutgoingSample,300> oa{},ob{};BufferSink sa{oa.data(),oa.size()},sb{ob.data(),ob.size()};
++        const auto a=trace_from_entry(c,i,entry,sa),b=trace_from_entry(d,i,rotated,sb);
++        check(accepted_status(a.status)&&accepted_status(b.status),"rotational trace accepted");
++        check(sa.size==sb.size,"rotational event count");
++        for(std::size_t j=0;j<sa.size;++j)
++        { near(oa[j].power_fraction,ob[j].power_fraction,2e-12,"rotational power");near_vec(rotate60(oa[j].direction),ob[j].direction,2e-12,"rotational direction"); }
++    }
++    const auto base=trace_batch_cpu(c,0,100);
++    for(double scale:{1e-6,1e6})
++    {
++        auto s=c;s.prism.circumradius_mm*=scale;s.prism.length_mm*=scale;
++        auto b=trace_batch_cpu(s,0,100);require_accepted(summarize(b.audits));
++        check(base.outgoing.size()==b.outgoing.size(),"scale event count");
++        for(std::size_t j=0;j<b.outgoing.size();++j)
++        {
++            near(base.outgoing[j].power_fraction,b.outgoing[j].power_fraction,1e-12,"scale power");
++            near_vec(base.outgoing[j].direction,b.outgoing[j].direction,1e-12,"scale direction");
++            near(base.outgoing[j].internal_length_mm,b.outgoing[j].internal_length_mm/scale,1e-10,"scale path length");
++        }
++    }
++}
++void direction_aspect_sweep()
++{
++    std::uint64_t statuses[8]{},tir=0;
++    double max_balance=0,largest_tail=0;
++    for(unsigned condition=0;condition<300;++condition)
++    {
++        const Vec3 k{2*sample_uniform(119,condition,0)-1,
++                     2*sample_uniform(119,condition,1)-1,
++                     2*sample_uniform(119,condition,2)-1};
++        const double length=0.2+5*sample_uniform(127,condition,0);
++        auto c=make_trace_settings({1,length},k,1,1.31,100,condition+700,1024,1e-12);
++        for(unsigned i=0;i<100;++i)
++        {
++            CountSink sink{};const auto a=trace_sample(c,i,sink);
++            ++statuses[static_cast<unsigned>(a.status)];tir+=a.tir_count;
++            max_balance=(std::max)(max_balance,::fabs(a.balance_error));
++            largest_tail=(std::max)(largest_tail,a.unresolved_power);
++            if(!accepted_status(a.status))
++                std::cerr<<"sweep failure condition="<<condition<<" sample="<<i<<" status="<<status_name(a.status)
++                    <<" hits="<<a.internal_hits<<" escaped="<<a.escaped_power<<" residual="<<a.unresolved_power
++                    <<" length="<<length<<" k="<<k.x<<","<<k.y<<","<<k.z<<'\n';
++            check(accepted_status(a.status),"direction/aspect sweep unaccepted ray");
++            check(::fabs(a.balance_error)<1e-10,"direction/aspect sweep balance");
++        }
++    }
++    check(tir>0,"sweep did not exercise total internal reflection");
++    std::cout<<"  sweep_rays=30000 tir_encounters="<<tir<<" maximum_balance_error="<<max_balance
++        <<" maximum_unresolved="<<largest_tail<<'\n';
++}
++void long_tir_residual()
++{
++    const unsigned condition=157;
++    const Vec3 k{2*sample_uniform(119,condition,0)-1,
++                 2*sample_uniform(119,condition,1)-1,
++                 2*sample_uniform(119,condition,2)-1};
++    const double length=0.2+5*sample_uniform(127,condition,0);
++    auto c=make_trace_settings({1,length},k,1,1.31,100,condition+700,256,1e-12);
++    CountSink sink{};const auto limited=trace_sample(c,93,sink);
++    check(limited.status==TraceStatus::InteractionLimit,"long TIR must report cap");
++    check(limited.unresolved_power>0.98&&limited.tir_count==256,"large missing flux must remain visible");
++    c.max_internal_hits=1024;
++    const auto resolved=trace_sample(c,93,sink);
++    check(accepted_status(resolved.status)&&resolved.internal_hits>256,"higher-order trace resolves escaped ray");
++    check(resolved.unresolved_power<1e-12,"long TIR final residual");
++    near(resolved.escaped_power+resolved.unresolved_power,1,1e-10,"long TIR total balance");
++    std::cout<<"  long_TIR_hits="<<resolved.internal_hits<<" capped_residual="<<limited.unresolved_power
++        <<" resolved_residual="<<resolved.unresolved_power<<'\n';
++}
++void errors()
++{
++    rejects([]{auto s=config();s.prism.circumradius_mm=0;validate_settings(s);});
++    rejects([]{auto s=config();s.interior_index=0;validate_settings(s);});
++    rejects([]{auto s=config();s.incident_direction={0,0,0};validate_settings(s);});
++    rejects([]{auto s=config();s.residual_power_tolerance=1;validate_settings(s);});
++    rejects([]{auto s=config();s.max_internal_hits=0;validate_settings(s);});
++    rejects([]{auto s=config();s.total_incident_samples=0;validate_settings(s);});
++    rejects([]{static_cast<void>(trace_batch_cpu(config(),1024,1));});
++    rejects([]{static_cast<void>(trace_batch_cpu(config(),0,1,0));});
++    auto c=config();EntrySample vertex{{0,1,1},6,true};CountSink counter{};
++    const auto a=trace_from_entry(c,0,vertex,counter);
++    check(a.status==TraceStatus::AmbiguousBoundary&&a.unresolved_power==1,"ambiguous source not discarded silently");
++    auto e=sample_entry(c.prism,c.incident_direction,0.3,0.4,0.6);BufferSink sink{};
++    const auto b=trace_from_entry(c,0,e,sink);
++    check(b.status==TraceStatus::OutputOverflow&&b.unresolved_power==1,"bounded output");
++    check(!sample_entry(c.prism,c.incident_direction,1,0.3,0.3).valid,"endpoint sampling rejected");
++    std::array<RayAudit,1> invalid{};invalid[0].status=TraceStatus::Exhausted;
++    invalid[0].escaped_power=std::numeric_limits<double>::quiet_NaN();
++    check(!summarize(invalid).accepted,"nonfinite output rejected");
++}
++}
++int main()
++{
++    const std::array<std::pair<const char*,std::function<void()>>,11> tests{{
++        {"projected_area",projection},{"independent_mesh_intersection",intersection_mesh},
++        {"projected_entry_sampling",entry_sampling},{"fresnel_snell_tir",fresnel},
++        {"polarization_history",polarization_history},{"analytic_slab_and_tail",slab_and_tail},
++        {"oblique_trace_and_batching",prism_trace_and_batch},{"symmetry_and_scale",symmetry_and_scale},
++        {"direction_aspect_sweep",direction_aspect_sweep},{"long_TIR_residual",long_tir_residual},{"failure_paths",errors}}};
++    unsigned passed=0;std::cout<<std::setprecision(17);
++    for(const auto& [name,test]:tests)
++    {
++        try{test();++passed;std::cout<<"PASS "<<name<<'\n';}
++        catch(const std::exception& e){std::cerr<<"FAIL "<<name<<": "<<e.what()<<'\n';return 1;}
++    }
++    std::cout<<passed<<"/"<<tests.size()<<" test groups passed\n";return 0;
++}

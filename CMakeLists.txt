@@ -167,3 +167,8 @@ message(STATUS "Rainbow: BUILD_TESTING=${BUILD_TESTING}")
 message(STATUS "Rainbow: detailed diagnostics=${RAINBOW_ENABLE_DIAGNOSTICS}")
 message(STATUS "Rainbow: current executable=rainbow_trace (reference/CSV CLI)")
 
+# Independent hexagonal-prism backend; keep the rain-drop solver unchanged.
+option(ICE_BUILD_HEX_TRACE "Build the additive hexagonal-prism tracer" ON)
+if(ICE_BUILD_HEX_TRACE)
+    add_subdirectory(hex_trace)
+endif()

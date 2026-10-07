@@ -1,0 +1,36 @@
+# CMake generated Testfile for 
+# Source directory: C:/Users/sy415/workspace/ice-crystal-phase/hex_trace
+# Build directory: C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host
+# 
+# This file includes the relevant testing commands required for 
+# testing this directory and lists subdirectories to be tested as well.
+if(CTEST_CONFIGURATION_TYPE MATCHES "^([Dd][Ee][Bb][Uu][Gg])$")
+  add_test([=[ice_hex_host]=] "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/Debug/ice_hex_host_tests.exe")
+  set_tests_properties([=[ice_hex_host]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;87;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Rr][Ee][Ll][Ee][Aa][Ss][Ee])$")
+  add_test([=[ice_hex_host]=] "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/Release/ice_hex_host_tests.exe")
+  set_tests_properties([=[ice_hex_host]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;87;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Mm][Ii][Nn][Ss][Ii][Zz][Ee][Rr][Ee][Ll])$")
+  add_test([=[ice_hex_host]=] "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/MinSizeRel/ice_hex_host_tests.exe")
+  set_tests_properties([=[ice_hex_host]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;87;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Rr][Ee][Ll][Ww][Ii][Tt][Hh][Dd][Ee][Bb][Ii][Nn][Ff][Oo])$")
+  add_test([=[ice_hex_host]=] "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/RelWithDebInfo/ice_hex_host_tests.exe")
+  set_tests_properties([=[ice_hex_host]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;87;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+else()
+  add_test([=[ice_hex_host]=] NOT_AVAILABLE)
+endif()
+if(CTEST_CONFIGURATION_TYPE MATCHES "^([Dd][Ee][Bb][Uu][Gg])$")
+  add_test([=[ice_hex_cli]=] "C:/Users/sy415/AppData/Local/Programs/Python/Python311/python.exe" "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/tests/cli_test.py" "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/Debug/ice_trace_hex_cpu.exe")
+  set_tests_properties([=[ice_hex_cli]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;90;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Rr][Ee][Ll][Ee][Aa][Ss][Ee])$")
+  add_test([=[ice_hex_cli]=] "C:/Users/sy415/AppData/Local/Programs/Python/Python311/python.exe" "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/tests/cli_test.py" "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/Release/ice_trace_hex_cpu.exe")
+  set_tests_properties([=[ice_hex_cli]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;90;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Mm][Ii][Nn][Ss][Ii][Zz][Ee][Rr][Ee][Ll])$")
+  add_test([=[ice_hex_cli]=] "C:/Users/sy415/AppData/Local/Programs/Python/Python311/python.exe" "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/tests/cli_test.py" "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/MinSizeRel/ice_trace_hex_cpu.exe")
+  set_tests_properties([=[ice_hex_cli]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;90;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+elseif(CTEST_CONFIGURATION_TYPE MATCHES "^([Rr][Ee][Ll][Ww][Ii][Tt][Hh][Dd][Ee][Bb][Ii][Nn][Ff][Oo])$")
+  add_test([=[ice_hex_cli]=] "C:/Users/sy415/AppData/Local/Programs/Python/Python311/python.exe" "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/tests/cli_test.py" "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/RelWithDebInfo/ice_trace_hex_cpu.exe")
+  set_tests_properties([=[ice_hex_cli]=] PROPERTIES  _BACKTRACE_TRIPLES "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;90;add_test;C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/CMakeLists.txt;0;")
+else()
+  add_test([=[ice_hex_cli]=] NOT_AVAILABLE)
+endif()

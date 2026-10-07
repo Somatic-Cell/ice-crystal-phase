@@ -1,0 +1,52 @@
+Start testing: Oct 07 22:23 東京 (標準時)
+----------------------------------------------------------
+1/2 Testing: ice_hex_host
+1/2 Test: ice_hex_host
+Command: "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/Release/ice_hex_host_tests.exe"
+Directory: C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host
+"ice_hex_host" start time: Oct 07 22:23 東京 (標準時)
+Output:
+----------------------------------------------------------
+PASS projected_area
+  maximum_mesh_distance_error=8.8817841970012523e-16
+PASS independent_mesh_intersection
+PASS projected_entry_sampling
+  maximum_interface_power_error=6.6613381477509392e-16
+PASS fresnel_snell_tir
+PASS polarization_history
+PASS analytic_slab_and_tail
+  oblique_outputs=24781 maximum_ray_balance_error=6.6613381477509392e-16 mean_unresolved=3.7252017720314054e-13
+PASS oblique_trace_and_batching
+PASS symmetry_and_scale
+  sweep_rays=30000 tir_encounters=211275 maximum_balance_error=2.4868995751603507e-14 maximum_unresolved=9.9985356483051156e-13
+PASS direction_aspect_sweep
+  long_TIR_hits=366 capped_residual=0.98130110278240223 resolved_residual=9.8129324495953925e-14
+PASS long_TIR_residual
+PASS failure_paths
+11/11 test groups passed
+<end of output>
+Test time =   0.38 sec
+----------------------------------------------------------
+Test Passed.
+"ice_hex_host" end time: Oct 07 22:23 東京 (標準時)
+"ice_hex_host" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/2 Testing: ice_hex_cli
+2/2 Test: ice_hex_cli
+Command: "C:/Users/sy415/AppData/Local/Programs/Python/Python311/python.exe" "C:/Users/sy415/workspace/ice-crystal-phase/hex_trace/tests/cli_test.py" "C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/Release/ice_trace_hex_cpu.exe"
+Directory: C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host
+"ice_hex_cli" start time: Oct 07 22:23 東京 (標準時)
+Output:
+----------------------------------------------------------
+PASS CLI: accepted output, CSV Jones/area weights, refused overwrite, rejected tail, invalid/duplicate input, no CUDA fallback
+backend=cpu rays=17 outputs=136 escaped_mean=0.9999999999993967 unresolved_mean=6.0339724424121014e-13 max_balance_error=0
+<end of output>
+Test time =   0.47 sec
+----------------------------------------------------------
+Test Passed.
+"ice_hex_cli" end time: Oct 07 22:23 東京 (標準時)
+"ice_hex_cli" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Oct 07 22:23 東京 (標準時)

@@ -1,0 +1,10 @@
+^C:\USERS\SY415\WORKSPACE\ICE-CRYSTAL-PHASE\BUILD-HEX-HOST\CMAKEFILES\69605226759450DD903C0E3D0B98A05A\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/sy415/workspace/ice-crystal-phase/hex_trace -BC:/Users/sy415/workspace/ice-crystal-phase/build-hex-host --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/sy415/workspace/ice-crystal-phase/build-hex-host/IceHexTrace.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
