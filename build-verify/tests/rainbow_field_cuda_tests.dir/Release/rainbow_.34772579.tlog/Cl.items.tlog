@@ -1,5 +1,0 @@
-C:\Users\sy415\workspace\rainbow\tests\test_field_cuda.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_field_cuda_tests.dir\Release\test_field_cuda.obj
-C:\Users\sy415\workspace\rainbow\src\cuda_driver.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_field_cuda_tests.dir\Release\cuda_driver.obj
-C:\Users\sy415\workspace\rainbow\src\cuda_module.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_field_cuda_tests.dir\Release\cuda_module.obj
-C:\Users\sy415\workspace\rainbow\src\cuda_error.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_field_cuda_tests.dir\Release\cuda_error.obj
-C:\Users\sy415\workspace\rainbow\src\read_binary_file.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_field_cuda_tests.dir\Release\read_binary_file.obj

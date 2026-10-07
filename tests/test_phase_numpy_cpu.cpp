@@ -8,7 +8,6 @@
 #include <fstream>
 #include <iostream>
 #include <limits>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,26 +36,17 @@ void emit(const std::filesystem::path& path)
         for(unsigned i=0;i<=nt;++i)theta[base+i]=columns[j]>0?theta[base+i]/columns[j]:edges[i];
         theta[base]=0;theta[base+nt]=1;
     }
-    std::mt19937_64 generator(42);std::uniform_real_distribution<double> uniform(0,1);
-    std::vector<double> witness;witness.reserve(20000*5);
-    for(unsigned n=0;n<20000;++n)
-    {
-        const double x=n==0?0.0:(n==1?std::nextafter(1.,0.):uniform(generator));
-        const double y=n==0?0.0:(n==1?std::nextafter(1.,0.):uniform(generator));
-        const auto s=sample_phase_cdf(phi,theta,edges,x,y);
-        require(s.u>=0&&s.u<1&&s.v>=0&&s.v<1&&s.pdf_omega>0,"Invalid sample");
-        require(s.phi_cell>0&&s.phi_cell<np-1,"Sampled a zero-probability column");
-        witness.insert(witness.end(),{x,y,s.u,s.v,s.pdf_omega});
-    }
     DatasetDirectory directory(path);
     const std::array<std::uint64_t,1> a{np+1},e{nt+1};
-    const std::array<std::uint64_t,2> b{np,nt+1},w{20000,5};
+    const std::array<std::uint64_t,2> b{np,nt+1};
     {NpyFloat64Writer file(directory.staging()/"phi_cdf.npy",a);file.append(phi);file.finish();}
     {NpyFloat64Writer file(directory.staging()/"theta_given_phi_cdf.npy",b);
         file.append(std::span<const double>(theta).first(7));
         file.append(std::span<const double>(theta).subspan(7));file.finish();}
     {NpyFloat64Writer file(directory.staging()/"u_edges.npy",e);file.append(edges);file.finish();}
-    {NpyFloat64Writer file(directory.staging()/"cpp_samples.npy",w);file.append(witness);file.finish();}
+    const std::array<std::uint64_t,2> mass_shape{np,nt};
+    for(auto& x:weights)x/=total;
+    {NpyFloat64Writer file(directory.staging()/"expected_mass.npy",mass_shape);file.append(weights);file.finish();}
     const std::array<std::uint64_t,8> bits{
         0,0x8000000000000000ull,1,0x3fefffffffffffffull,
         0x3ff0000000000000ull,0x7fefffffffffffffull,0x7ff0000000000000ull,0x7ff8000000001234ull};
@@ -95,7 +85,7 @@ int main(int argc,char** argv)
         emit(path);
         // All stream objects have been closed before Windows cleanup.
         std::filesystem::remove_all(path);
-        std::cout<<"NPY writer and 20000 CDF inversions passed.\n";
+        std::cout<<"NPY writer and saved mass fixture passed.\n";
         return 0;
     }
     catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}

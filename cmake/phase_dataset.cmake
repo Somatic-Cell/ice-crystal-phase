@@ -65,6 +65,23 @@ if(BUILD_TESTING)
         "$<TARGET_OBJECTS:rainbow_phase_cdf_module>" COMMAND_EXPAND_LISTS)
     set_tests_properties(rainbow_phase_cdf_cuda PROPERTIES LABELS "gpu;cuda;cdf")
 
+    add_executable(rainbow_phase_storage_cpu_tests
+        "${PROJECT_SOURCE_DIR}/tests/test_phase_storage_cpu.cpp")
+    target_include_directories(rainbow_phase_storage_cpu_tests PRIVATE "${PROJECT_SOURCE_DIR}/include")
+    target_compile_features(rainbow_phase_storage_cpu_tests PRIVATE cxx_std_20)
+    rainbow_configure_host(rainbow_phase_storage_cpu_tests)
+    add_test(NAME rainbow_phase_storage_cpu COMMAND rainbow_phase_storage_cpu_tests)
+    set_tests_properties(rainbow_phase_storage_cpu PROPERTIES LABELS "cpu;cdf;storage")
+
+    add_executable(rainbow_phase_storage_cuda_tests
+        "${PROJECT_SOURCE_DIR}/tests/test_phase_storage_cuda.cpp")
+    target_link_libraries(rainbow_phase_storage_cuda_tests PRIVATE rainbow_phase_dataset)
+    rainbow_configure_host(rainbow_phase_storage_cuda_tests)
+    add_dependencies(rainbow_phase_storage_cuda_tests rainbow_phase_cdf_module)
+    add_test(NAME rainbow_phase_storage_cuda COMMAND rainbow_phase_storage_cuda_tests
+        "$<TARGET_OBJECTS:rainbow_phase_cdf_module>" COMMAND_EXPAND_LISTS)
+    set_tests_properties(rainbow_phase_storage_cuda PROPERTIES LABELS "gpu;cuda;cdf;storage")
+
     # Optional Python discovery is confined to the explicit testing build.
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
@@ -76,7 +93,7 @@ if(BUILD_TESTING)
                     -s "${PROJECT_SOURCE_DIR}/tests" -p test_phase_numpy.py -v)
             set_tests_properties(rainbow_phase_numpy_python PROPERTIES
                 ENVIRONMENT "PYTHONPATH=${PROJECT_SOURCE_DIR}/python"
-                LABELS "python;cdf;sampling")
+                LABELS "python;cdf;io")
             add_test(NAME rainbow_phase_numpy_cpp_interop
                 COMMAND "${Python3_EXECUTABLE}"
                     "${PROJECT_SOURCE_DIR}/tests/check_phase_numpy_cpp.py"

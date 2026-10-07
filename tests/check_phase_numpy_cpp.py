@@ -1,4 +1,4 @@
-"""Independent C++ writer -> stock NumPy -> sampler interoperability check.
+"""Independent C++ writer -> stock NumPy -> CDF mass interoperability check.
 
 All generated inputs are synthetic test fixtures, not optical ground truth.
 """
@@ -25,14 +25,16 @@ def main() -> None:
             0x7FF0000000000000, 0x7FF8000000001234,
         ], dtype=np.uint64)
         np.testing.assert_array_equal(values.view(np.uint64), expected)
-        witness = np.load(root / "cpp_samples.npy", allow_pickle=False)
+        expected_mass = np.load(root / "expected_mass.npy", allow_pickle=False)
         with PhaseRecord(root) as record:
-            actual = record.sample_uniforms(witness[:, :2])
-            np.testing.assert_allclose(actual.uv, witness[:, 2:4], rtol=0, atol=3e-16)
-            np.testing.assert_allclose(actual.pdf_omega, witness[:, 4], rtol=2e-15, atol=0)
-            np.testing.assert_allclose(actual.pdf_omega, record.pdf_omega(actual.uv), rtol=5e-15, atol=0)
+            actual_mass = np.diff(record.phi_cdf)[:, None]*np.diff(record.theta_cdf, axis=1)
+            np.testing.assert_allclose(actual_mass, expected_mass, rtol=5e-12, atol=5e-16)
+            mass, g = record.mass_and_g()
+            np.testing.assert_allclose(mass, 1.0, rtol=0, atol=2e-15)
+            expected_g = np.sum(expected_mass*(1.0-(record.u_edges[:-1]+record.u_edges[1:])))
+            np.testing.assert_allclose(g, expected_g, rtol=0, atol=2e-15)
         # Close all mappings before Windows TemporaryDirectory cleanup.
-    print("C++ -> NPY -> NumPy: 8 bit patterns and 20000 samples/PDFs passed.")
+    print("C++ -> NPY -> NumPy: 8 bit patterns and all CDF cell masses/moment passed.")
 
 
 if __name__ == "__main__":

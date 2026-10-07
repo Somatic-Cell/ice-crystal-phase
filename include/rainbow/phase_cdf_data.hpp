@@ -40,6 +40,45 @@ struct PhaseCdfPolicy
     double maximum_lost_mass = 1e-12;
     bool allow_underresolved = false;
 };
+// Additional storage filtering is explicitly separate from the optical
+// diffraction approximation. Zero dimensions inherit the query grid.
+struct PhaseStorageSettings
+{
+    std::uint32_t theta_count = 0, phi_count = 0;
+    double gaussian_sigma_degrees = 0;
+    double gaussian_support_sigma = 4;
+    double maximum_coarsening_tv = 1; // structural default, NOT accuracy certification
+};
+struct PhaseStorageStatistics
+{
+    double g_source = 0, g_filtered = 0, g_stored = 0;
+    double gaussian_integral_relative_change = 0;
+    double aggregation_integral_relative_change = 0;
+    double coarsening_tv = 0, cdf_mass = 0;
+    bool gaussian_underresolved = false;
+};
+struct PhaseMomentSum
+{
+    double mass, axial, tv;
+    std::uint64_t weight_underflow;
+};
+struct PhaseStorageParams
+{
+    PhaseDensityView input{};
+    const double* fine_edges = nullptr;
+    const double* fine_values = nullptr;
+    const double* coarse_values = nullptr;
+    const double* phi_cdf = nullptr;
+    const double* theta_cdf = nullptr;
+    const double* coarse_edges = nullptr;
+    double* output = nullptr;
+    PhaseMomentSum* moment_partials = nullptr;
+    std::uint32_t nt = 0, np = 0, out_nt = 0, out_np = 0;
+    double divisor = 1, sigma_rad = 0, support_sigma = 4;
+    double fine_mass = 1, coarse_mass = 1;
+};
+static_assert(std::is_trivially_copyable_v<PhaseStorageParams>);
+static_assert(std::is_trivially_default_constructible_v<PhaseMomentSum>);
 struct PhaseCdfBuildParams
 {
     PhaseDensityView input{};

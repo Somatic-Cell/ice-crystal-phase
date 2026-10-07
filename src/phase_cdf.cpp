@@ -11,6 +11,7 @@
 #include <locale>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace rainbow
 {
@@ -137,7 +138,9 @@ void write_device_npy(const CudaContext& c, const DeviceBuffer<double>& buffer,
 }
 PhaseCdf::PhaseCdf(const CudaContext& c)
     : context_(c),module_(c),edges_(c),phi_(c),theta_(c),column_sums_(c),total_(c),
-      partials_(c),input_summary_(c),audit_summary_(c) {}
+      partials_(c),input_summary_(c),audit_summary_(c),
+      fine_edges_(c),fine_values_(c),filtered_values_(c),coarse_values_(c),
+      moment_partials_(c),moment_result_(c) {}
 PhaseCdf::~PhaseCdf() noexcept
 {
     if(pending_)
@@ -150,6 +153,7 @@ void PhaseCdf::load_module(const std::filesystem::path& path)
 {
     module_.load_fatbin(path);
     static_cast<void>(module_.find_function("rainbow_phase_cdf_abi_v1"));
+    static_cast<void>(module_.find_function("rainbow_phase_storage_abi_v2"));
     // Diagnose a stale CDF module at load time, not after an expensive trace.
     static_cast<void>(module_.find_function("phase_check_density_failures_only"));
 }
@@ -197,7 +201,7 @@ void PhaseCdf::validate_trace(const RaindropTracer& trace)
     if(status.incomplete) throw std::runtime_error("Trace contains failed vertices: "+describe(status));
 }
 void PhaseCdf::build(const PatchOptics& optics,std::uint32_t nt,std::uint32_t np,
-                     PhaseDensityStage stage,const PhaseCdfPolicy& policy)
+                     PhaseDensityStage stage,const PhaseCdfPolicy& policy,const PhaseStorageSettings& storage)
 {
     valid_=false;
     if(!optics.has_result() || !optics.is_unpolarized() || stage==PhaseDensityStage::Scalar)
@@ -215,11 +219,29 @@ void PhaseCdf::build(const PatchOptics& optics,std::uint32_t nt,std::uint32_t np
         throw std::invalid_argument("Focal array length mismatch.");
     if(v.diffraction && optics.diffraction_results().element_count()!=v.count)
         throw std::invalid_argument("Diffraction array length mismatch.");
-    build(v,nt,np,policy);
+    build(v,nt,np,policy,storage);
 }
-void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,const PhaseCdfPolicy& policy)
+void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,const PhaseCdfPolicy& policy,const PhaseStorageSettings& storage)
 {
     valid_=false;validate_policy(policy);
+    const auto out_nt=storage.theta_count?storage.theta_count:nt;
+    const auto out_np=storage.phi_count?storage.phi_count:np;
+    if(!out_nt || !out_np || !nt || !np || out_nt>nt || out_np>np || nt%out_nt || np%out_np)
+        throw std::invalid_argument("CDF storage grid must be an integer coarsening of the query grid.");
+    const double sigma=storage.gaussian_sigma_degrees*phase_cdf_pi/180.0;
+    if(!(std::isfinite(sigma) && sigma>=0 && std::isfinite(storage.gaussian_support_sigma)
+        && storage.gaussian_support_sigma>=2 && storage.gaussian_support_sigma<=8
+        && sigma*storage.gaussian_support_sigma<phase_cdf_pi
+        && std::isfinite(storage.maximum_coarsening_tv) && storage.maximum_coarsening_tv>=0
+        && storage.maximum_coarsening_tv<=1))
+        throw std::invalid_argument("Invalid storage Gaussian / coarsening error policy.");
+    if(sigma>0 && (nt>32767 || np>32767))
+        throw std::invalid_argument("Storage Gaussian uses the solver's <=32767 angular-index range.");
+    storage_statistics_={};
+    storage_statistics_.gaussian_underresolved=sigma>0 &&
+        ((phase_cdf_pi/double(nt)>0.5*sigma)||(2*phase_cdf_pi/double(np)>0.5*sigma));
+    if(storage_statistics_.gaussian_underresolved && !policy.allow_underresolved)
+        throw std::invalid_argument("Storage Gaussian is underresolved on the QUERY grid; use a finer query grid or explicit --allow-underresolved.");
     const auto count=std::uint64_t(nt)*np;
     // Same angular-index range as the existing solver. Tiles must fit gridDim.y.
     if(!module_.is_loaded() || nt==0 || np==0 || count>0xffffffffull ||
@@ -233,17 +255,18 @@ void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,co
         throw std::invalid_argument("Missing source buffer.");
     synchronize();nt_=nt;np_=np;
     edges_.close();phi_.close();theta_.close();column_sums_.close();total_.close();
+    fine_edges_.close();fine_values_.close();filtered_values_.close();coarse_values_.close();
+    moment_partials_.close();moment_result_.close();
     allocate_partials(count);
+    moment_partials_.allocate(partial_count_);moment_result_.allocate(1);
     host_edges_=make_phase_u_edges(nt);
     edges_.allocate(host_edges_.size());
     // This O(Ntheta) coordinate metadata is not an optical readback.
     RAINBOW_CUDA_CHECK(cuMemcpyHtoD(edges_.address(),host_edges_.data(),edges_.byte_size()));
-    phi_.allocate(std::size_t(np)+1);theta_.allocate(std::size_t(np)*(std::size_t(nt)+1));
-    column_sums_.allocate(np);total_.allocate(1);
+
     PhaseCdfBuildParams p{};
     p.input=input;p.u_edges=edges_.data();p.input_summary=input_summary_.data();
-    p.phi_cdf=phi_.data();p.theta_cdf=theta_.data();p.column_sums=column_sums_.data();
-    p.total=total_.data();p.partials=partials_.data();p.output_summary=audit_summary_.data();
+    p.partials=partials_.data();p.output_summary=audit_summary_.data();
     p.theta_count=nt;p.phi_count=np;
     void* args[]={&p};
     launch("phase_check_density",args,partial_count_);reduce_to(input_summary_);synchronize();
@@ -299,6 +322,75 @@ void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,co
         }
         throw std::runtime_error(failure.str());
     }
+    // The original optical gate ABOVE is mandatory: smoothing must never hide
+    // an unavailable contribution. The source statistics keep their old meaning.
+    PhaseStorageParams sp{};sp.input=input;sp.nt=nt;sp.np=np;
+    sp.fine_edges=edges_.data();sp.divisor=input_statistics_.maximum;
+    sp.out_nt=out_nt;sp.out_np=out_np;
+    const auto source=measure(sp,"phase_storage_measure");
+    if(source.weight_underflow || !(std::isfinite(source.mass)&&source.mass>0&&std::isfinite(source.axial)))
+        throw std::runtime_error("Invalid source angular moment.");
+    storage_statistics_.g_source=source.axial/source.mass;
+    storage_statistics_.g_filtered=storage_statistics_.g_source;
+    const bool transformed=sigma>0 || out_nt!=nt || out_np!=np;
+    if(transformed)
+    {
+        fine_edges_.allocate(host_edges_.size());
+        RAINBOW_CUDA_CHECK(cuMemcpyHtoD(fine_edges_.address(),host_edges_.data(),fine_edges_.byte_size()));
+        sp.fine_edges=fine_edges_.data();
+        fine_values_.allocate(count);sp.output=fine_values_.data();
+        void* storage_args[]={&sp};
+        launch("phase_storage_extract",storage_args,partial_count_);
+        sp.fine_values=fine_values_.data();
+        if(sigma>0)
+        {
+            filtered_values_.allocate(count);sp.output=filtered_values_.data();
+            sp.sigma_rad=sigma;sp.support_sigma=storage.gaussian_support_sigma;
+            launch("phase_storage_gaussian",storage_args,partial_count_);
+            sp.fine_values=filtered_values_.data();
+        }
+        sp.input={};sp.input.scalar=sp.fine_values;sp.input.count=count;sp.divisor=1;
+        const auto filtered=measure(sp,"phase_storage_measure");
+        if(filtered.weight_underflow || !(std::isfinite(filtered.mass)&&filtered.mass>0&&std::isfinite(filtered.axial)))
+            throw std::runtime_error("Storage filtering produced an invalid angular moment.");
+        storage_statistics_.g_filtered=filtered.axial/filtered.mass;
+        storage_statistics_.gaussian_integral_relative_change=filtered.mass/source.mass-1.0;
+        if(out_nt!=nt || out_np!=np)
+        {
+            coarse_values_.allocate(std::size_t(out_nt)*out_np);sp.output=coarse_values_.data();
+            launch("phase_storage_coarsen",storage_args,partial_count_);
+            std::vector<double> coarse_edges(std::size_t(out_nt)+1);
+            for(std::uint32_t i=0;i<=out_nt;++i)coarse_edges[i]=host_edges_[i*(nt/out_nt)];
+            host_edges_=std::move(coarse_edges);
+            // Previous kernels only read fine_edges_, not edges_.
+            synchronize();edges_.close();edges_.allocate(host_edges_.size());
+            RAINBOW_CUDA_CHECK(cuMemcpyHtoD(edges_.address(),host_edges_.data(),edges_.byte_size()));
+            auto cp=sp;cp.input={};cp.input.scalar=coarse_values_.data();cp.input.count=std::uint64_t(out_nt)*out_np;
+            cp.nt=out_nt;cp.np=out_np;cp.fine_edges=edges_.data();
+            const auto coarse=measure(cp,"phase_storage_measure");
+            if(coarse.weight_underflow || !(std::isfinite(coarse.mass)&&coarse.mass>0&&std::isfinite(coarse.axial)))
+                throw std::runtime_error("Storage aggregation produced an invalid angular moment.");
+            storage_statistics_.aggregation_integral_relative_change=coarse.mass/filtered.mass-1.0;
+            if(::fabs(storage_statistics_.aggregation_integral_relative_change)>1e-10)
+                throw std::runtime_error("Storage aggregation failed mass-conservation check.");
+            sp.coarse_values=coarse_values_.data();sp.fine_mass=filtered.mass;sp.coarse_mass=coarse.mass;
+            storage_statistics_.coarsening_tv=measure(sp,"phase_storage_measure_tv").tv;
+            if(!std::isfinite(storage_statistics_.coarsening_tv) ||
+                storage_statistics_.coarsening_tv>storage.maximum_coarsening_tv)
+                throw std::runtime_error("Storage coarsening exceeds configured TV limit: "+std::to_string(storage_statistics_.coarsening_tv));
+            input=cp.input;
+        }
+        else input=sp.input;
+        nt=out_nt;np=out_np;nt_=nt;np_=np;
+        p.input=input;p.u_edges=edges_.data();p.theta_count=nt;p.phi_count=np;
+        launch("phase_check_density",args,partial_count_);reduce_to(input_summary_);synchronize();
+        PhaseCdfReduction processed{};input_summary_.download({&processed,1});
+        if(processed.invalid_values || processed.incomplete || !(processed.maximum>0))
+            throw std::runtime_error("Invalid processed density: "+describe(processed));
+    }
+    phi_.allocate(std::size_t(np)+1);theta_.allocate(std::size_t(np)*(std::size_t(nt)+1));
+    column_sums_.allocate(np);total_.allocate(1);
+    p.phi_cdf=phi_.data();p.theta_cdf=theta_.data();p.column_sums=column_sums_.data();p.total=total_.data();
     launch("phase_make_weights",args,(np+31u)/32u,(nt+31u)/32u,32,8);
     launch("phase_scan_conditionals",args,(np+255u)/256u);
     launch("phase_scan_marginal",args,1,1,1,1);
@@ -311,7 +403,27 @@ void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,co
        audit_statistics_.l1_error>policy.maximum_l1_error ||
        audit_statistics_.lost_mass>policy.maximum_lost_mass)
         throw std::runtime_error("CDF rounding/structure audit failed: "+describe(audit_statistics_));
+    sp.phi_cdf=phi_.data();sp.theta_cdf=theta_.data();sp.coarse_edges=edges_.data();
+    sp.out_nt=nt;sp.out_np=np;
+    const auto saved=measure(sp,"phase_storage_measure_cdf");
+    if(!(std::isfinite(saved.mass)&&saved.mass>0&&std::isfinite(saved.axial)) || ::fabs(saved.mass-1)>1e-10)
+        throw std::runtime_error("Invalid probability mass / moment in stored CDF.");
+    storage_statistics_.cdf_mass=saved.mass;
+    storage_statistics_.g_stored=saved.axial/saved.mass;
+    if(!(storage_statistics_.g_stored>-1 && storage_statistics_.g_stored<1))
+        throw std::runtime_error("Stored first moment is outside the nondegenerate HG range.");
+    // All launches are synchronized by measure(). Only CDFs survive the build.
+    fine_values_.close();filtered_values_.close();coarse_values_.close();fine_edges_.close();
     valid_=true;
+}
+PhaseMomentSum PhaseCdf::measure(PhaseStorageParams p,const char* kernel)
+{
+    p.moment_partials=moment_partials_.data();
+    void* args[]={&p};launch(kernel,args,partial_count_);
+    auto* in=moment_partials_.data();auto* out=moment_result_.data();
+    void* reduction[]={&in,&partial_count_,&out};
+    launch("phase_storage_reduce_moments",reduction,1);synchronize();
+    PhaseMomentSum result{};moment_result_.download({&result,1});return result;
 }
 void PhaseCdf::write_arrays(const std::filesystem::path& directory) const
 {

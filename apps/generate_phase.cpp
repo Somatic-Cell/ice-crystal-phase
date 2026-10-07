@@ -36,6 +36,8 @@ struct Command
     RaindropSettings settings{};
     WaveOpticsSettings wave{};
     PhaseCdfPolicy policy{};
+    PhaseStorageSettings storage{};
+    double inclination_degrees=20;
     std::filesystem::path modules, output;
     std::uint32_t theta=360,phi=720;
     PhaseDensityStage stage=PhaseDensityStage::Diffraction;
@@ -72,7 +74,7 @@ template<class Char> Command parse(int argc,Char** argv)
 {
     Command c;c.settings.radius_mm=1.0f;c.settings.grid_width=c.settings.grid_height=513;
     c.modules=std::filesystem::absolute(std::filesystem::path(argv[0])).parent_path()/"modules";
-    double inclination=20;
+
     for(int i=1;i<argc;++i)
     {
         const auto option=std::filesystem::path(argv[i]).string();
@@ -86,7 +88,10 @@ template<class Char> Command parse(int argc,Char** argv)
                          "  --stage diffraction|focal|incoherent|path\n"
                          "  --diffraction-sigma-deg S --focal-offsets 0,0,0,0\n"
                          "  --allow-underresolved  (explicitly accept flagged angular underresolution)\n"
-                         "  --cdf-max-l1 E --cdf-max-lost-mass E --device ORDINAL\n";
+                         "  --cdf-max-l1 E --cdf-max-lost-mass E --device ORDINAL\n"
+                         "  --cdf-theta T --cdf-phi P (integer divisors of query dimensions)\n"
+                         "  --storage-gaussian-sigma-deg S (0: no additional blur; default 0)\n"
+                         "  --storage-gaussian-support S (default 4) --max-coarsening-tv E\n";
             return {};
         }
         if(++i>=argc) throw std::invalid_argument("Missing option value.");
@@ -99,7 +104,12 @@ template<class Char> Command parse(int argc,Char** argv)
         else if(option=="--grid") c.settings.grid_width=c.settings.grid_height=positive_integer(value);
         else if(option=="--query-theta") c.theta=positive_integer(value);
         else if(option=="--query-phi") c.phi=positive_integer(value);
-        else if(option=="--inclination-deg") inclination=number(value);
+        else if(option=="--inclination-deg") c.inclination_degrees=number(value);
+        else if(option=="--cdf-theta") c.storage.theta_count=positive_integer(value);
+        else if(option=="--cdf-phi") c.storage.phi_count=positive_integer(value);
+        else if(option=="--storage-gaussian-sigma-deg") c.storage.gaussian_sigma_degrees=number(value);
+        else if(option=="--storage-gaussian-support") c.storage.gaussian_support_sigma=number(value);
+        else if(option=="--max-coarsening-tv") c.storage.maximum_coarsening_tv=number(value);
         else if(option=="--diffraction-sigma-deg") c.wave.primary_sigma_degrees=number(value);
         else if(option=="--transition-contrast") c.wave.transition_contrast=number(value);
         else if(option=="--cdf-max-l1") c.policy.maximum_l1_error=number(value);
@@ -138,7 +148,20 @@ template<class Char> Command parse(int argc,Char** argv)
         else throw std::invalid_argument("Unknown option: "+option);
     }
     if(c.output.empty()) throw std::invalid_argument("--out is required.");
-    const double angle=inclination*phase_cdf_pi/180.0;
+    const double angle=c.inclination_degrees*phase_cdf_pi/180.0;
+    if(c.storage.theta_count==0)c.storage.theta_count=c.theta;
+    if(c.storage.phi_count==0)c.storage.phi_count=c.phi;
+    if(c.storage.theta_count>c.theta || c.storage.phi_count>c.phi ||
+       c.theta%c.storage.theta_count || c.phi%c.storage.phi_count)
+        throw std::invalid_argument("CDF dimensions must divide the query dimensions without upsampling.");
+    const double sigma=c.storage.gaussian_sigma_degrees;
+    if(!(sigma>=0 && c.storage.gaussian_support_sigma>=2 && c.storage.gaussian_support_sigma<=8
+        && sigma*c.storage.gaussian_support_sigma<180
+        && c.storage.maximum_coarsening_tv>=0 && c.storage.maximum_coarsening_tv<=1))
+        throw std::invalid_argument("Invalid storage filter / coarsening error settings.");
+    if(sigma>0 && !c.policy.allow_underresolved &&
+       (180.0/double(c.theta)>0.5*sigma || 360.0/double(c.phi)>0.5*sigma))
+        throw std::invalid_argument("QUERY grid is too coarse for storage Gaussian (criterion h<=sigma/2); explicit --allow-underresolved is required for a preview.");
     c.settings.incident_direction={static_cast<float>(std::cos(angle)),static_cast<float>(-std::sin(angle)),0};
     static_cast<void>(c.settings.make_config());
     if(std::filesystem::exists(c.output)) throw std::runtime_error("Output already exists.");
@@ -162,14 +185,15 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
     if(!out)throw std::runtime_error("Cannot open metadata.json.");
     out.imbue(std::locale::classic());out<<std::setprecision(17);
     const auto& s=cdf.input_statistics();const auto& a=cdf.audit_statistics();
+    const auto& storage=cdf.storage_statistics();
     auto k=normalized({config.incident_direction.x,config.incident_direction.y,config.incident_direction.z});
     D3 e{config.incident_basis_x.x,config.incident_basis_x.y,config.incident_basis_x.z};
     const double d=dot(e,k);for(unsigned i=0;i<3;++i)e[i]-=d*k[i];e=normalized(e);
     const D3 f{k[1]*e[2]-k[2]*e[1],k[2]*e[0]-k[0]*e[2],k[0]*e[1]-k[1]*e[0]};
     const FoldedPatchConfig folded{};
-    out << "{\n  \"schema\": \"rainbow.phase_cdf.numpy.v1\",\n  \"complete\": true,\n"
+    out << "{\n  \"schema\": \"rainbow.phase_cdf.numpy.v2\",\n  \"complete\": true,\n"
         << "  \"dtype\": \"<f8\",\n  \"order\": \"C\",\n"
-        << "  \"theta_count\": "<<c.theta<<",\n  \"phi_count\": "<<c.phi<<",\n"
+        << "  \"theta_count\": "<<cdf.theta_count()<<",\n  \"phi_count\": "<<cdf.phi_count()<<",\n"
         << "  \"density_measure\": \"solid_angle_sr\",\n"
         << "  \"cell_model\": \"constant_density_per_spherical_cell\",\n"
         << "  \"coordinates\": \"u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)\",\n"
@@ -205,7 +229,7 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
        <<"  \"folded_relative_tolerance\": "<<folded.relative_tolerance<<",\n"
        <<"  \"source_commit\": \""<<RAINBOW_SOURCE_COMMIT<<"\",\n"
        <<"  \"source_dirty_at_configure\": "<<(RAINBOW_SOURCE_DIRTY?"true":"false")<<",\n"
-       <<"  \"generator_version\": \"numpy_cdf_v1\",\n"
+       <<"  \"generator_version\": \"numpy_cdf_storage_v2\",\n"
        <<"  \"quality\": {\n    \"source_coverage_certified\": false,\n"
        <<"    \"angular_convergence_certified\": false,\n"
        <<"    \"missing_source_cells\": "<<patches.statistics().count(PatchCellStatus::MissingCorners)<<",\n"
@@ -218,7 +242,28 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
        <<"    \"cdf_lost_positive_cells\": "<<a.lost_cells<<",\n"
        <<"    \"cdf_lost_probability_mass\": "<<a.lost_mass<<",\n"
        <<"    \"maximum_accepted_l1_mass_error\": "<<c.policy.maximum_l1_error<<",\n"
-       <<"    \"maximum_accepted_lost_probability_mass\": "<<c.policy.maximum_lost_mass<<"\n  }\n}\n";
+       <<"    \"maximum_accepted_lost_probability_mass\": "<<c.policy.maximum_lost_mass<<"\n  },\n"
+       <<"  \"incident_inclination_degrees\": "<<c.inclination_degrees<<",\n"
+       <<"  \"query_grid\": ["<<c.theta<<','<<c.phi<<"],\n"
+       <<"  \"storage_processing\": {\n"
+       <<"    \"additional_filter\": \""<<(c.storage.gaussian_sigma_degrees>0?"spherical_geodesic_gaussian_row_normalized":"none")<<"\",\n"
+       <<"    \"additional_filter_is_paper_diffraction\": false,\n"
+       <<"    \"sigma_degrees\": "<<c.storage.gaussian_sigma_degrees<<",\n"
+       <<"    \"support_sigma\": "<<c.storage.gaussian_support_sigma<<",\n"
+       <<"    \"gaussian_underresolved\": "<<(storage.gaussian_underresolved?"true":"false")<<",\n"
+       <<"    \"aggregation\": \"nested_solid_angle_mass_preserving\",\n"
+       <<"    \"gaussian_integral_relative_change\": "<<storage.gaussian_integral_relative_change<<",\n"
+       <<"    \"aggregation_integral_relative_change\": "<<storage.aggregation_integral_relative_change<<",\n"
+       <<"    \"coarsening_tv\": "<<storage.coarsening_tv<<",\n"
+       <<"    \"maximum_accepted_coarsening_tv\": "<<c.storage.maximum_coarsening_tv<<"\n  },\n"
+       <<"  \"hg\": {\n    \"g\": "<<storage.g_stored<<",\n"
+       <<"    \"method\": \"first_moment_of_saved_cell_pdf\",\n"
+       <<"    \"target\": \"saved_cdf\",\n"
+       <<"    \"cosine_convention\": \"dot(incident_propagation,outgoing_propagation)\",\n"
+       <<"    \"axis_particle_frame\": ["<<k[0]<<','<<k[1]<<','<<k[2]<<"],\n"
+       <<"    \"g_source\": "<<storage.g_source<<",\n"
+       <<"    \"g_filtered\": "<<storage.g_filtered<<",\n"
+       <<"    \"cdf_mass_check\": "<<storage.cdf_mass<<"\n  }\n}\n";
     out.flush();if(!out)throw std::runtime_error("Metadata write failed.");
     out.close();if(out.fail())throw std::runtime_error("Metadata close failed.");
 }
@@ -246,7 +291,7 @@ template<class Char> int run(int argc,Char** argv)
     if(c.stage==PhaseDensityStage::Incoherent || c.stage==PhaseDensityStage::Path)
         optics.evaluate_device(patches,query,tracer.config());
     else optics.evaluate_wave_device(patches,query,tracer.config(),c.wave);
-    cdf.build(optics,c.theta,c.phi,c.stage,c.policy);
+    cdf.build(optics,c.theta,c.phi,c.stage,c.policy,c.storage);
     DatasetDirectory destination(c.output);
     cdf.write_arrays(destination.staging());
     write_metadata(destination.staging()/"metadata.json",c,tracer.config(),patches,cdf);
@@ -254,7 +299,10 @@ template<class Char> int run(int argc,Char** argv)
     const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
     std::cout<<"Saved NumPy CDF dataset: "<<c.output<<"; elapsed_seconds="<<elapsed
         <<"; CDF_L1_mass_error="<<cdf.audit_statistics().l1_error
-        <<"; lost_probability_mass="<<cdf.audit_statistics().lost_mass<<'\n';
+        <<"; lost_probability_mass="<<cdf.audit_statistics().lost_mass
+        <<"; saved_grid="<<cdf.theta_count()<<'x'<<cdf.phi_count()
+        <<"; hg_g="<<cdf.storage_statistics().g_stored
+        <<"; coarsening_TV="<<cdf.storage_statistics().coarsening_tv<<'\n';
     return 0;
 }
 }

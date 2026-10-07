@@ -1,34 +1,19 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 import json
-import math
 import numpy as np
-from numpy.typing import NDArray
 
-SCHEMA = "rainbow.phase_cdf.numpy.v1"
-
-
-@dataclass(frozen=True)
-class SampleBatch:
-    """uv[:,0]=(1-cos(theta))/2, uv[:,1]=(phi+pi)/(2*pi)."""
-    uv: NDArray[np.float64]
-    pdf_omega: NDArray[np.float64]
-    cells: NDArray[np.int64]  # [theta_cell, phi_cell]
-
-    @property
-    def pdf_uv(self) -> NDArray[np.float64]:
-        return self.pdf_omega * (4.0 * np.pi)
+SCHEMAS = {"rainbow.phase_cdf.numpy.v1", "rainbow.phase_cdf.numpy.v2"}
 
 
 class PhaseRecord:
     """Read standard NPYs; never rebuild, renormalize, clamp or transpose the CDF.
 
-    validate=True performs a bounded-memory integrity scan once, not per batch.
+    validate=True performs a bounded-memory integrity scan once.
     mmap avoids eagerly allocating all arrays, but random disk access is NOT
-    equivalent to GPU memory access. Use to_torch() once per resident condition.
+    equivalent to GPU memory access. Sampling and learning belong to another project.
     """
 
     def __init__(self, directory: str | Path, *, validate: bool = True) -> None:
@@ -41,7 +26,7 @@ class PhaseRecord:
         with metadata_path.open("r", encoding="utf-8") as stream:
             self.metadata: dict[str, Any] = json.load(stream)
         m = self.metadata
-        if m.get("schema") != SCHEMA or m.get("complete") is not True:
+        if m.get("schema") not in SCHEMAS or m.get("complete") is not True:
             raise ValueError("Unknown schema or incomplete record")
         for key, expected in {
             "dtype": "<f8", "order": "C", "density_measure": "solid_angle_sr",
@@ -138,104 +123,36 @@ class PhaseRecord:
             use = index_in_row != 0
             if np.any(a[use] < self._theta_flat[positions[use] - 1]):
                 raise ValueError("Conditional CDF decreases; refusing to repair it")
+        if self.metadata["schema"].endswith(".v2"):
+            hg = self.metadata.get("hg", {})
+            if (hg.get("method") != "first_moment_of_saved_cell_pdf" or
+                    hg.get("target") != "saved_cdf" or
+                    hg.get("cosine_convention") != "dot(incident_propagation,outgoing_propagation)"):
+                raise ValueError("Unsupported HG moment convention")
+            value = hg.get("g")
+            if type(value) not in (int, float) or not np.isfinite(value) or not -1 < value < 1:
+                raise ValueError("Invalid HG first moment")
+            mass, g = self.mass_and_g(block_elements=block_elements)
+            if abs(mass-1.0) > 1e-10 or abs(g-float(value)) > 5e-12:
+                raise ValueError("HG label is inconsistent with saved CDF")
         self._validated = True
 
-    @staticmethod
-    def _coordinates(values: NDArray[np.float64]) -> NDArray[np.float64]:
-        a = np.asarray(values)
-        if a.dtype != np.float64 or a.ndim != 2 or a.shape[1] != 2:
-            raise TypeError("Expected a float64 array with shape (batch, 2)")
-        if not np.isfinite(a).all():
-            raise ValueError("Coordinates must be finite")
-        return a
-
-    def sample_uniforms(self, xi: NDArray[np.float64]) -> SampleBatch:
+    def mass_and_g(self, *, block_elements: int = 1 << 20) -> tuple[float, float]:
+        """Validation statistic only: exact cell-integral formula, no point generation."""
         self._require_open()
-        xi = self._coordinates(xi)
-        if np.any(xi < 0) or np.any(xi >= 1):
-            raise ValueError("Uniform coordinates must lie in [0, 1)")
-        count = len(xi)
-        j = np.searchsorted(self.phi_cdf, xi[:, 0], side="right") - 1
-        base = j * (self.nt + 1)
-        lo = np.zeros(count, dtype=np.int64)
-        hi = np.full(count, self.nt, dtype=np.int64)
-        # Element-wise binary search: O(batch) working memory, not O(batch*Ntheta).
-        for _ in range(self.nt.bit_length()):
-            mid = (lo + hi) // 2
-            right = self._theta_flat[base + mid] <= xi[:, 1]
-            lo = np.where(right, mid + 1, lo)
-            hi = np.where(right, hi, mid)
-        i = lo - 1
-        a0 = self.phi_cdf[j]
-        a = self.phi_cdf[j + 1] - a0
-        b0 = self._theta_flat[base + i]
-        b = self._theta_flat[base + i + 1] - b0
-        if np.any(a <= 0) or np.any(b <= 0):
-            raise ValueError("CDF inversion selected an empty interval")
-        r0 = (xi[:, 0] - a0) / a
-        r1 = (xi[:, 1] - b0) / b
-        lower = self.u_edges[i]
-        upper = self.u_edges[i + 1]
-        du = upper - lower
-        u = np.minimum(lower + r1 * du, np.nextafter(upper, lower))
-        vlo, vhi = j / self.np, (j + 1) / self.np
-        v = np.minimum((j + r0) / self.np, np.nextafter(vhi, vlo))
-        pdf = a * b * self.np / (4.0 * np.pi * du)
-        return SampleBatch(np.stack((u, v), axis=1), pdf, np.stack((i, j), axis=1))
-
-    def sample(self, count: int, *, rng: np.random.Generator | None = None) -> SampleBatch:
-        if type(count) is not int or count < 0:
-            raise ValueError("count must be nonnegative")
-        rng = np.random.default_rng() if rng is None else rng
-        return self.sample_uniforms(rng.random((count, 2), dtype=np.float64))
-
-    def iter_batches(self, *, batch_size: int, batches: int | None = None,
-                     seed: int | None = None) -> Iterator[SampleBatch]:
-        if type(batch_size) is not int or batch_size < 1:
-            raise ValueError("batch_size must be positive")
-        if batches is not None and (type(batches) is not int or batches < 0):
-            raise ValueError("batches must be nonnegative or None")
-        rng = np.random.default_rng(seed)
-        index = 0
-        while batches is None or index < batches:
-            yield self.sample(batch_size, rng=rng)
-            index += 1
-
-    def pdf_omega(self, uv: NDArray[np.float64]) -> NDArray[np.float64]:
-        self._require_open()
-        uv = self._coordinates(uv)
-        result = np.zeros(len(uv), dtype=np.float64)
-        valid = np.all((uv >= 0) & (uv < 1), axis=1)
-        x = uv[valid]
-        i = np.searchsorted(self.u_edges, x[:, 0], side="right") - 1
-        j = np.minimum(np.floor(x[:, 1] * self.np).astype(np.int64), self.np - 1)
-        # Correct quotient rounding at representable phi-cell boundaries.
-        j -= x[:, 1] < j / self.np
-        j += x[:, 1] >= (j + 1) / self.np
-        base = j * (self.nt + 1) + i
-        mass = (self.phi_cdf[j + 1] - self.phi_cdf[j]) * (
-            self._theta_flat[base + 1] - self._theta_flat[base])
-        result[valid] = mass * self.np / (4.0 * np.pi * (self.u_edges[i + 1] - self.u_edges[i]))
-        return result
-
-    def pdf_uv(self, uv: NDArray[np.float64]) -> NDArray[np.float64]:
-        return self.pdf_omega(uv) * (4.0 * np.pi)
-
-    def directions(self, uv: NDArray[np.float64]) -> NDArray[np.float64]:
-        self._require_open()
-        uv = self._coordinates(uv)
-        if np.any(uv < 0) or np.any(uv >= 1):
-            raise ValueError("uv must lie in [0, 1)")
-        u, v = uv[:, 0], uv[:, 1]
-        mu = 1.0 - 2.0 * u
-        radial = 2.0 * np.sqrt(u * (1.0 - u))
-        phi = (2.0 * np.pi) * v - np.pi
-        local = np.stack((radial * np.cos(phi), radial * np.sin(phi), mu), axis=1)
-        return local @ self.frame.T
-
-    def to_torch(self, device: str = "cpu"):
-        self._require_open()
-        if not self._validated:
-            self.validate()
-        from .torch_sampler import TorchPhaseSampler
-        return TorchPhaseSampler(self, device=device)
+        if not isinstance(block_elements, int) or block_elements <= 0:
+            raise ValueError("block_elements must be positive")
+        mean_mu = 1.0-(self.u_edges[:-1]+self.u_edges[1:])
+        mass = np.longdouble(0)
+        axial = np.longdouble(0)
+        # Bound memory even when a conditional row is larger than the chunk.
+        for j in range(self.np):
+            q = np.longdouble(self.phi_cdf[j+1]-self.phi_cdf[j])
+            for i in range(0, self.nt, block_elements):
+                stop = min(i+block_elements, self.nt)
+                w = np.diff(self.theta_cdf[j, i:stop+1]).astype(np.longdouble)*q
+                mass += w.sum(dtype=np.longdouble)
+                axial += (w*mean_mu[i:stop]).sum(dtype=np.longdouble)
+        if not np.isfinite(mass) or not mass > 0 or not np.isfinite(axial):
+            raise ValueError("Invalid reconstructed probability mass")
+        return float(mass), float(axial/mass)

@@ -234,3 +234,106 @@ extern "C" __global__ void phase_audit_cdf(rainbow::PhaseCdfBuildParams p)
     }
     block_reduce(local,p.partials+blockIdx.x);
 }
+
+// Storage v2: spherical prefilter, conservative aggregation, HG first moment.
+#include <rainbow/phase_storage_math.hpp>
+extern "C" __global__ void rainbow_phase_storage_abi_v2() {}
+namespace
+{
+__device__ void reduce_moments(rainbow::PhaseMomentSum a, rainbow::PhaseMomentSum* out)
+{
+    __shared__ rainbow::PhaseMomentSum shared[256];
+    shared[threadIdx.x]=a;
+    __syncthreads();
+    for(unsigned s=128;s;s/=2)
+    {
+        if(threadIdx.x<s)
+        {
+            shared[threadIdx.x].mass+=shared[threadIdx.x+s].mass;
+            shared[threadIdx.x].axial+=shared[threadIdx.x+s].axial;
+            shared[threadIdx.x].tv+=shared[threadIdx.x+s].tv;
+            shared[threadIdx.x].weight_underflow+=shared[threadIdx.x+s].weight_underflow;
+        }
+        __syncthreads();
+    }
+    if(threadIdx.x==0)*out=shared[0];
+}
+}
+extern "C" __global__ void phase_storage_reduce_moments(
+    const rainbow::PhaseMomentSum* input, std::uint32_t count, rainbow::PhaseMomentSum* output)
+{
+    rainbow::phase_storage_math::Sum mass{},axial{},tv{};
+    std::uint64_t underflow=0;
+    for(std::uint32_t k=threadIdx.x;k<count;k+=blockDim.x)
+    {mass.add(input[k].mass);axial.add(input[k].axial);tv.add(input[k].tv);underflow+=input[k].weight_underflow;}
+    reduce_moments({mass.value(),axial.value(),tv.value(),underflow},output);
+}
+extern "C" __global__ void phase_storage_extract(rainbow::PhaseStorageParams p)
+{
+    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+        k<p.input.count;k+=std::uint64_t(gridDim.x)*blockDim.x)
+    {
+        bool a=false,b=false;
+        p.output[k]=density(p.input,k,a,b)/p.divisor;
+    }
+}
+extern "C" __global__ void phase_storage_gaussian(rainbow::PhaseStorageParams p)
+{
+    const rainbow::phase_storage_math::Grid g{p.fine_values,p.fine_edges,p.nt,p.np};
+    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+        k<std::uint64_t(p.nt)*p.np;k+=std::uint64_t(gridDim.x)*blockDim.x)
+        p.output[k]=rainbow::phase_storage_math::gaussian_at(
+            g,std::uint32_t(k/p.np),std::uint32_t(k%p.np),p.sigma_rad,p.support_sigma);
+}
+extern "C" __global__ void phase_storage_coarsen(rainbow::PhaseStorageParams p)
+{
+    const rainbow::phase_storage_math::Grid g{p.fine_values,p.fine_edges,p.nt,p.np};
+    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+        k<std::uint64_t(p.out_nt)*p.out_np;k+=std::uint64_t(gridDim.x)*blockDim.x)
+        p.output[k]=rainbow::phase_storage_math::coarsen_at(
+            g,std::uint32_t(k/p.out_np),std::uint32_t(k%p.out_np),p.out_nt,p.out_np);
+}
+extern "C" __global__ void phase_storage_measure(rainbow::PhaseStorageParams p)
+{
+    rainbow::phase_storage_math::Sum mass{},axial{};
+    std::uint64_t underflow=0;
+    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+        k<p.input.count;k+=std::uint64_t(gridDim.x)*blockDim.x)
+    {
+        bool a=false,b=false;
+        const auto i=std::uint32_t(k/p.np);
+        const double d=density(p.input,k,a,b);
+        const double weight=(d/p.divisor)*(p.fine_edges[i+1]-p.fine_edges[i]);
+        underflow+=d>0 && !(weight>0);
+        const double w=weight/double(p.np);
+        mass.add(w);axial.add(w*rainbow::phase_storage_math::mean_cosine(p.fine_edges[i],p.fine_edges[i+1]));
+    }
+    reduce_moments({mass.value(),axial.value(),0,underflow},p.moment_partials+blockIdx.x);
+}
+extern "C" __global__ void phase_storage_measure_tv(rainbow::PhaseStorageParams p)
+{
+    rainbow::phase_storage_math::Sum tv{};
+    const auto rt=p.nt/p.out_nt,rp=p.np/p.out_np;
+    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+        k<std::uint64_t(p.nt)*p.np;k+=std::uint64_t(gridDim.x)*blockDim.x)
+    {
+        const auto i=std::uint32_t(k/p.np),j=std::uint32_t(k%p.np);
+        const double a=p.fine_values[k]/p.fine_mass;
+        const double b=p.coarse_values[std::uint64_t(i/rt)*p.out_np+j/rp]/p.coarse_mass;
+        tv.add(0.5*::fabs(a-b)*(p.fine_edges[i+1]-p.fine_edges[i])/double(p.np));
+    }
+    reduce_moments({0,0,tv.value(),0},p.moment_partials+blockIdx.x);
+}
+extern "C" __global__ void phase_storage_measure_cdf(rainbow::PhaseStorageParams p)
+{
+    rainbow::phase_storage_math::Sum mass{},axial{};
+    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
+        k<std::uint64_t(p.out_nt)*p.out_np;k+=std::uint64_t(gridDim.x)*blockDim.x)
+    {
+        const auto i=std::uint32_t(k/p.out_np),j=std::uint32_t(k%p.out_np);
+        const auto b=std::uint64_t(j)*(p.out_nt+1ull)+i;
+        const double w=(p.phi_cdf[j+1]-p.phi_cdf[j])*(p.theta_cdf[b+1]-p.theta_cdf[b]);
+        mass.add(w);axial.add(w*rainbow::phase_storage_math::mean_cosine(p.coarse_edges[i],p.coarse_edges[i+1]));
+    }
+    reduce_moments({mass.value(),axial.value(),0,0},p.moment_partials+blockIdx.x);
+}

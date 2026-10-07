@@ -43,11 +43,12 @@ void run_case(CudaContext& context,PhaseCdf& cdf,unsigned nt,unsigned np)
         l1+=std::abs(recovered-expected);
     }
     require(l1<2e-12,"GPU CDF differs from independent CPU mass calculation");
-    for(unsigned k=0;k<1000;++k)
-    {
-        const auto sample=sample_phase_cdf(a,b,edges,(k+.5)/1000.0,((k*391u)%1000u+.5)/1000.0);
-        require(sample.pdf_omega>0,"Sampled a zero-probability interval");
-    }
+    long double moment=0;
+    for(unsigned j=0;j<np;++j)for(unsigned i=0;i<nt;++i)
+        moment+=static_cast<long double>((a[j+1]-a[j])*(b[j*(nt+1u)+i+1]-b[j*(nt+1u)+i]))*
+            static_cast<long double>(1.0-(edges[i]+edges[i+1]));
+    require(std::abs(cdf.storage_statistics().g_stored-static_cast<double>(moment))<5e-12,
+        "Saved-CDF HG moment disagrees with CPU reconstruction");
     density[0]=-1;
     RAINBOW_CUDA_CHECK(cuMemcpyHtoD(input.address(),density.data(),input.byte_size()));
     bool rejected=false;

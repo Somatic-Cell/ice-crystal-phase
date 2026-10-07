@@ -1,4 +1,4 @@
-"""NumPy-backed phase CDFs with matched sphere sampling and density evaluation."""
-from .record import PhaseRecord, SampleBatch
+"""Validation-only access to NumPy phase-CDF records. No sampler / ML dependency."""
+from .record import PhaseRecord
 
-__all__ = ["PhaseRecord", "SampleBatch"]
+__all__ = ["PhaseRecord"]

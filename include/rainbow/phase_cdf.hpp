@@ -24,9 +24,11 @@ public:
     void validate_trace(const RaindropTracer& trace);
     void build(const PatchOptics&, std::uint32_t ntheta, std::uint32_t nphi,
                PhaseDensityStage stage = PhaseDensityStage::Diffraction,
-               const PhaseCdfPolicy& policy = {});
+               const PhaseCdfPolicy& policy = {},
+               const PhaseStorageSettings& storage = {});
     void build(PhaseDensityView input, std::uint32_t ntheta, std::uint32_t nphi,
-               const PhaseCdfPolicy& policy = {});
+               const PhaseCdfPolicy& policy = {},
+               const PhaseStorageSettings& storage = {});
     // Writes only the three standard NPY files; metadata/commit are the caller's responsibility.
     void write_arrays(const std::filesystem::path& staging_directory) const;
     [[nodiscard]] const PhaseCdfReduction& input_statistics() const noexcept { return input_statistics_; }
@@ -34,9 +36,14 @@ public:
     [[nodiscard]] const std::vector<double>& u_edges() const noexcept { return host_edges_; }
     [[nodiscard]] const DeviceBuffer<double>& phi_cdf() const noexcept { return phi_; }
     [[nodiscard]] const DeviceBuffer<double>& theta_cdf() const noexcept { return theta_; }
+    [[nodiscard]] const PhaseStorageStatistics& storage_statistics() const noexcept { return storage_statistics_; }
+    [[nodiscard]] std::uint32_t theta_count() const noexcept { return nt_; }
+    [[nodiscard]] std::uint32_t phi_count() const noexcept { return np_; }
     [[nodiscard]] bool valid() const noexcept { return valid_; }
 private:
     void synchronize();
+    PhaseMomentSum measure(PhaseStorageParams, const char* kernel);
+
     void allocate_partials(std::uint64_t count);
     void reduce_to(DeviceBuffer<PhaseCdfReduction>& output);
     void launch(const char* name, void** args, unsigned gx, unsigned gy=1,
@@ -45,6 +52,9 @@ private:
     CudaModule module_;
     DeviceBuffer<double> edges_, phi_, theta_, column_sums_, total_;
     DeviceBuffer<PhaseCdfReduction> partials_, input_summary_, audit_summary_;
+    DeviceBuffer<double> fine_edges_, fine_values_, filtered_values_, coarse_values_;
+    DeviceBuffer<PhaseMomentSum> moment_partials_, moment_result_;
+    PhaseStorageStatistics storage_statistics_{};
     std::vector<double> host_edges_;
     PhaseCdfReduction input_statistics_{}, audit_statistics_{};
     std::uint32_t nt_=0, np_=0, partial_count_=0;
