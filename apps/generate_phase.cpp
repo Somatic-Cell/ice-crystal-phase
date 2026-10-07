@@ -8,6 +8,7 @@
 #include <rainbow/folded_patch_data.hpp>
 #include <rainbow/rainbow_diffraction.hpp>
 #include <rainbow/water_refractive_index.hpp>
+#include <rainbow/projected_area.hpp>
 
 #include <array>
 #include <charconv>
@@ -230,7 +231,8 @@ D3 normalized(D3 a)
     return a;
 }
 void write_metadata(const std::filesystem::path& path,const Command& c,
-    const RaindropTraceConfig& config,const PatchAccel& patches,const PhaseCdf& cdf)
+    const RaindropTraceConfig& config,const PatchAccel& patches,const PhaseCdf& cdf,
+    const ProjectedAreaResult& area)
 {
     std::ofstream out(path,std::ios::binary|std::ios::trunc);
     if(!out)throw std::runtime_error("Cannot open metadata.json.");
@@ -242,7 +244,43 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
     const double d=dot(e,k);for(unsigned i=0;i<3;++i)e[i]-=d*k[i];e=normalized(e);
     const D3 f{k[1]*e[2]-k[2]*e[1],k[2]*e[0]-k[0]*e[2],k[0]*e[1]-k[1]*e[0]};
     const FoldedPatchConfig folded{};
-    out << "{\n  \"material\": {\n";
+    out << "{\n"
+        << "  \"coordinate_contract_id\": \"rainbow.phase_cdf.coordinates.v1\",\n"
+        << "  \"direction_convention\": \"physical_propagation\",\n"
+        << "  \"particle_frame_handedness\": \"right\",\n"
+        << "  \"particle_up_axis\": [0,1,0],\n"
+        << "  \"shape_polar_axis\": [0,-1,0],\n"
+        << "  \"sampling_frame_layout\": \"rows_xyz_columns_e0_e1_k\",\n"
+        << "  \"sampling_frame_map\": \"local_column_to_particle_column\",\n"
+        << "  \"theta_zero\": \"forward\",\n"
+        << "  \"theta_pi\": \"backward\",\n"
+        << "  \"azimuth_periodic\": true,\n"
+        << "  \"inclination_definition\": \"ki=(cos(alpha),-sin(alpha),0); alpha=0 is +x; positive alpha points downward\",\n"
+        << "  \"geometry\": {\n"
+        << "    \"projected_area_mm2\": " << area.area_mm2 << ",\n"
+        << "    \"projected_area_m2\": " << area.area_mm2*1e-6 << ",\n"
+        << "    \"projected_area_method\": \"" << (area.analytic_sphere?"analytic_sphere":"convex_surface_integral_azimuth_analytic_gk15") << "\",\n"
+        << "    \"projected_area_shape\": \"solver_shape_coefficients_promoted_to_fp64\",\n"
+        << "    \"projected_area_converged\": true,\n"
+        << "    \"projected_area_absolute_error_estimate_mm2\": " << area.estimated_absolute_error_mm2 << ",\n"
+        << "    \"projected_area_relative_error_estimate\": " << area.estimated_relative_error << ",\n"
+        << "    \"projected_area_error_is_rigorous_bound\": false,\n"
+        << "    \"convexity_verified\": true,\n"
+        << "    \"convexity_method\": \"" << (area.analytic_sphere?"analytic_sphere":"outward_rounded_interval_curvature") << "\",\n"
+        << "    \"convexity_intervals\": " << area.convexity_intervals << ",\n"
+        << "    \"quadrature_evaluations\": " << area.quadrature_evaluations << ",\n"
+        << "    \"incident_axis_particle_frame\": [" << k[0] << ',' << k[1] << ',' << k[2] << "]\n  },\n"
+        << "  \"cross_sections\": {\n"
+        << "    \"model\": \"geometric_nonabsorbing\",\n"
+        << "    \"scattering_mm2\": " << area.area_mm2 << ",\n"
+        << "    \"extinction_mm2\": " << area.area_mm2 << ",\n"
+        << "    \"absorption_mm2\": 0,\n"
+        << "    \"scattering_m2\": " << area.area_mm2*1e-6 << ",\n"
+        << "    \"extinction_m2\": " << area.area_mm2*1e-6 << ",\n"
+        << "    \"absorption_m2\": 0,\n"
+        << "    \"assignment\": \"Csca=Cext=Aproj; Cabs=0 (transport model assumption)\",\n"
+        << "    \"wave_scattering_cross_section_computed\": false\n  },\n"
+        << "  \"material\": {\n";
     out << "    \"model\": \"" << (c.material==Command::Material::Water?"water_iapws_r9_97":"constant") << "\",\n"
         << "    \"wavelength_convention\": \"vacuum_nm\",\n"
         << "    \"wavelength_requested_nm\": " << c.wavelength_requested_nm << ",\n"
@@ -291,7 +329,7 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
         << "  \"input_polarization\": \"unpolarized\",\n"
         << "  \"incident_total_intensity\": 1,\n  \"single_scattering_albedo\": 1,\n"
         << "  \"collision_model\": \"geometric_projected_area\",\n"
-        << "  \"projected_area_storage\": \"separate_geometry_table_not_implemented_here\",\n"
+        << "  \"projected_area_storage\": \"metadata.geometry.projected_area_mm2\",\n"
         << "  \"stage\": \""<<stage_name(c.stage)<<"\",\n"
         << "  \"radius_mm\": "<<config.radius_mm<<",\n"
         << "  \"wavelength_nm\": "<<config.wavelength_nm<<",\n"
@@ -316,7 +354,7 @@ void write_metadata(const std::filesystem::path& path,const Command& c,
        <<"  \"folded_relative_tolerance\": "<<folded.relative_tolerance<<",\n"
        <<"  \"source_commit\": \""<<RAINBOW_SOURCE_COMMIT<<"\",\n"
        <<"  \"source_dirty_at_configure\": "<<(RAINBOW_SOURCE_DIRTY?"true":"false")<<",\n"
-       <<"  \"generator_version\": \"numpy_cdf_water_policy_v1\",\n"
+       <<"  \"generator_version\": \"numpy_cdf_water_geometry_v1\",\n"
        <<"  \"quality\": {\n    \"source_coverage_certified\": false,\n"
        <<"    \"angular_convergence_certified\": false,\n"
        <<"    \"missing_source_cells\": "<<patches.statistics().count(PatchCellStatus::MissingCorners)<<",\n"
@@ -358,6 +396,16 @@ template<class Char> int run(int argc,Char** argv)
 {
     const auto c=parse(argc,argv);
     if(c.output.empty())return 0;
+    // Independent CPU geometric integral; validate BEFORE expensive GPU work.
+    // The coefficients and direction are exactly those supplied to the solver.
+    const auto geometry_config=c.settings.make_config();
+    std::array<double,8> area_coefficients{};
+    for(unsigned n=0;n<8;++n)area_coefficients[n]=geometry_config.shape.coefficients[n];
+    const auto projected_area=compute_projected_area(area_coefficients,
+        double(geometry_config.radius_mm),
+        {double(geometry_config.incident_direction.x),
+         double(geometry_config.incident_direction.y),
+         double(geometry_config.incident_direction.z)});
     std::cout<<std::setprecision(17)
         <<"Material="<<(c.material==Command::Material::Water?"water_iapws_r9_97":"constant")
         <<" wavelength_vacuum_nm="<<c.settings.wavelength_nm
@@ -391,7 +439,7 @@ template<class Char> int run(int argc,Char** argv)
     cdf.build(optics,c.theta,c.phi,c.stage,c.policy,c.storage);
     DatasetDirectory destination(c.output);
     cdf.write_arrays(destination.staging());
-    write_metadata(destination.staging()/"metadata.json",c,tracer.config(),patches,cdf);
+    write_metadata(destination.staging()/"metadata.json",c,tracer.config(),patches,cdf,projected_area);
     destination.commit();
     const auto elapsed=std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
     std::cout<<"Saved NumPy CDF dataset: "<<c.output<<"; elapsed_seconds="<<elapsed
@@ -399,6 +447,7 @@ template<class Char> int run(int argc,Char** argv)
         <<"; lost_probability_mass="<<cdf.audit_statistics().lost_mass
         <<"; saved_grid="<<cdf.theta_count()<<'x'<<cdf.phi_count()
         <<"; hg_g="<<cdf.storage_statistics().g_stored
+        <<"; projected_area_mm2="<<projected_area.area_mm2
         <<"; coarsening_TV="<<cdf.storage_statistics().coarsening_tv<<'\n';
     return 0;
 }
