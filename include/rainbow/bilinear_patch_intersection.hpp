@@ -242,8 +242,11 @@ template<class T> HOST_DEVICE Attempt<T> solve(
         if constexpr(std::is_same_v<T,float>)
         {
             // 近接した根・境界付近では FP64 で入力四隅から再計算する．
-            if(parameter_error>T(2e-5) || u<parameter_error || u>T(1)-parameter_error
-               || v<parameter_error || v>T(1)-parameter_error)
+            // Match the inclusive boundary test below. In FP32, rounding can make
+            // u == 1-parameter_error even for a root strictly inside the patch.
+            // That case must be reevaluated in FP64, not returned as a boundary.
+            if(parameter_error>T(2e-5) || u<=parameter_error || u>=T(1)-parameter_error
+               || v<=parameter_error || v>=T(1)-parameter_error)
             {out.retry=true;continue;}
         }
         if(parameter_error>T(1e-5) && !repeated) {out.retry=true;continue;}
@@ -266,7 +269,10 @@ template<class T> HOST_DEVICE Attempt<T> solve(
         }
         BilinearRayHit hit{};
         hit.u=static_cast<float>(u); hit.v=static_cast<float>(v); hit.t=static_cast<float>(t);
-        if(boundary || hit.u==0.0f || hit.u==1.0f || hit.v==0.0f || hit.v==1.0f)
+        // Membership is decided before packing u/v into FP32. An interior
+        // FP64 coordinate can round to 1.0f without lying on a shared edge.
+        // Preserve the pre-packing boundary decision and the residual check.
+        if(boundary)
             hit.flags|=BilinearBoundary;
         if(repeated) hit.flags|=BilinearSingular;
         if constexpr(std::is_same_v<T,double>) hit.flags|=BilinearUsedFp64;

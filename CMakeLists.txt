@@ -147,9 +147,20 @@ endif()
 if(BUILD_TESTING)
     include("${PROJECT_SOURCE_DIR}/cmake/rainbow_smoke.cmake")
     add_subdirectory(tests)
-    # This test uses the reporting API; other numerical tests do not need it.
-    target_link_libraries(rainbow_patch_failure_capture_gpu_tests PRIVATE rainbow_diagnostics)
+
+    # 診断APIを直接使用するテストにだけ，診断ライブラリをリンクする．
+    foreach(report_test IN ITEMS
+        rainbow_patch_failure_capture_gpu_tests
+        rainbow_unpolarized_cuda_tests
+    )
+        target_link_libraries(
+            ${report_test}
+            PRIVATE
+                rainbow_diagnostics
+        )
+    endforeach()
 endif()
+include("${PROJECT_SOURCE_DIR}/cmake/phase_dataset.cmake")
 
 message(STATUS "Rainbow: CUDA architectures=${CMAKE_CUDA_ARCHITECTURES}")
 message(STATUS "Rainbow: BUILD_TESTING=${BUILD_TESTING}")

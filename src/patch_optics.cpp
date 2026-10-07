@@ -48,8 +48,15 @@ void PatchOptics::evaluate_wave(const PatchAccel& source, const PatchQuery& quer
                                const RaindropTraceConfig& config, const WaveOpticsSettings& settings)
 { evaluate_impl(source, query, config, &settings); }
 
+void PatchOptics::evaluate_device(const PatchAccel& source, const PatchQuery& query,
+                                 const RaindropTraceConfig& config)
+{ evaluate_impl(source, query, config, nullptr, false); }
+void PatchOptics::evaluate_wave_device(const PatchAccel& source, const PatchQuery& query,
+    const RaindropTraceConfig& config, const WaveOpticsSettings& settings)
+{ evaluate_impl(source, query, config, &settings, false); }
+
 void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& query,
-                               const RaindropTraceConfig& config, const WaveOpticsSettings* wave)
+                               const RaindropTraceConfig& config, const WaveOpticsSettings* wave, const bool readback)
 {
     if(is_closed_ || !function_) throw std::logic_error("Load the optical CUDA module first.");
     if(!source.has_result() || !query.has_result() || !query.matches_source(source))
@@ -91,7 +98,7 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
     // Complete any use on this stream before reallocating our output. Other
     // streams are the caller's responsibility, as in the existing GPU classes.
     synchronize();
-    has_result_ = false; has_wave_result_ = false;
+    has_result_ = false; has_wave_result_ = false; has_host_result_ = false;
     results_.close(); focal_results_.close(); transitions_.close(); diffraction_results_.close();
     folded_indices_.close(); folded_written_.close(); folded_records_.close();
     folded_statistics_ = {}; result_used_folded_ = false; result_folded_config_ = folded_config_;
@@ -100,10 +107,14 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
     {
         wave_settings_=*wave;diffraction_config_=new_diffraction;
         focal_results_.allocate(n);transitions_.allocate(n);diffraction_results_.allocate(n);
-        host_focal_.resize(n);host_transitions_.resize(n);host_diffraction_.resize(n);
+        if(readback) { host_focal_.resize(n);host_transitions_.resize(n);host_diffraction_.resize(n); }
     }
-    host_results_.assign(n, PatchOpticalResult{});
-    host_directions_ = query.host_directions();
+    host_results_.clear(); host_directions_.clear();
+    if(readback)
+    {
+        host_results_.assign(n, PatchOpticalResult{});
+        host_directions_ = query.host_directions();
+    }
     config_ = config;
     result_unpolarized_ = source.is_unpolarized();
     has_grid_ = query.direction_grid() != nullptr;
@@ -169,12 +180,12 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
                                              0, cuda_context_.stream(), arguments, nullptr));
         }
         synchronize();
-        if(wave)
+        if(wave && readback)
         {
             focal_results_.download(host_focal_);transitions_.download(host_transitions_);
             diffraction_results_.download(host_diffraction_);
         }
-        results_.download(std::span<PatchOpticalResult>{host_results_});
+        if(readback) results_.download(std::span<PatchOpticalResult>{host_results_});
     }
     for(const auto& r : host_results_)
     {
@@ -185,7 +196,19 @@ void PatchOptics::evaluate_impl(const PatchAccel& source, const PatchQuery& quer
         statistics_.rejected_hits += r.rejected_hits;
         folded_statistics_.evaluated_hits += r.folded_evaluated_hits();
     }
-    if(result_used_folded_) collect_folded_statistics(wave != nullptr);
+    if(result_used_folded_)
+    {
+        if(readback) collect_folded_statistics(wave != nullptr);
+        else
+        {
+            // Keep the count integrity check; do not download all folded records.
+            std::uint32_t written=0;
+            folded_written_.download(std::span<std::uint32_t>{&written,1});
+            if(written != folded_statistics_.candidates)
+                throw std::runtime_error("Folded-patch count mismatch in device-only evaluation.");
+        }
+    }
+    has_host_result_ = readback;
     // A true result means that evaluation finished, NOT that all physics or all
     // source cells are complete. CLI inspects errors only after writing the CSV.
     has_result_ = true;
@@ -326,7 +349,7 @@ void PatchOptics::run_diffraction()
 
 void PatchOptics::write_csv(const std::filesystem::path& path) const
 {
-    if(!has_result_) throw std::logic_error("No optical result to save.");
+    if(!has_result_ || !has_host_result_) throw std::logic_error("No host optical result to save; use legacy evaluate() for CSV.");
     std::ofstream out(path);
     if(!out) throw std::runtime_error("Cannot open optical CSV.");
     out.imbue(std::locale::classic());
@@ -410,6 +433,7 @@ void PatchOptics::write_csv(const std::filesystem::path& path) const
 
 void PatchOptics::write_wave_csv(const std::filesystem::path& path) const
 {
+    if(!has_host_result_) throw std::logic_error("Device-only result has no CSV snapshot.");
     if(!has_wave_result_ || !has_result_ || !has_grid_) throw std::logic_error("No wave-optics grid result.");
     std::ofstream out(path);
     if(!out) throw std::runtime_error("Cannot open wave-optics CSV.");
@@ -518,7 +542,7 @@ bool PatchOptics::close_noexcept() noexcept
     ok = diffraction_results_.close_noexcept() && ok;
     ok = transitions_.close_noexcept() && ok;
     ok = focal_results_.close_noexcept() && ok;
-    has_wave_result_ = false;
+    has_wave_result_ = false; has_host_result_ = false;
     ok = results_.close_noexcept() && ok;
     ok = module_.close_noexcept() && ok;
     function_ = nullptr; has_result_ = false; is_closed_ = true;

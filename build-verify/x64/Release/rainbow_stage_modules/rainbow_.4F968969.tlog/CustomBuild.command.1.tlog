@@ -1,0 +1,28 @@
+^C:\USERS\SY415\WORKSPACE\RAINBOW\BUILD-VERIFY\CMAKEFILES\A16B2924638639D7619C6F1D06A12B05\RAINBOW_STAGE_MODULES.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E make_directory C:/Users/sy415/workspace/rainbow/build-verify/Release/modules
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/sy415/workspace/rainbow/build-verify/rainbow_raindrop_trace_module.dir/Release/raindrop_trace.optixir C:/Users/sy415/workspace/rainbow/build-verify/Release/modules/raindrop_trace.optixir
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/sy415/workspace/rainbow/build-verify/rainbow_patch_build_module.dir/Release/patch_build.fatbin C:/Users/sy415/workspace/rainbow/build-verify/Release/modules/patch_build.fatbin
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/sy415/workspace/rainbow/build-verify/rainbow_patch_query_module.dir/Release/patch_query.optixir C:/Users/sy415/workspace/rainbow/build-verify/Release/modules/patch_query.optixir
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/sy415/workspace/rainbow/build-verify/rainbow_patch_optics_module.dir/Release/patch_optics.fatbin C:/Users/sy415/workspace/rainbow/build-verify/Release/modules/patch_optics.fatbin
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\USERS\SY415\WORKSPACE\RAINBOW\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/sy415/workspace/rainbow -BC:/Users/sy415/workspace/rainbow/build-verify --check-stamp-file C:/Users/sy415/workspace/rainbow/build-verify/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

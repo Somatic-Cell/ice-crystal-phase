@@ -1,0 +1,10 @@
+^C:\USERS\SY415\WORKSPACE\RAINBOW\BUILD-VERIFY\CMAKEFILES\A16B2924638639D7619C6F1D06A12B05\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/sy415/workspace/rainbow -BC:/Users/sy415/workspace/rainbow/build-verify --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Users/sy415/workspace/rainbow/build-verify/Rainbow.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

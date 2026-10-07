@@ -1,0 +1,24 @@
+^C:\USERS\SY415\WORKSPACE\RAINBOW\BUILD-VERIFY\CMAKEFILES\A16B2924638639D7619C6F1D06A12B05\RAINBOW_STAGE_SMOKE_MODULES.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -E make_directory C:/Users/sy415/workspace/rainbow/build-verify/tests/smoke/Release/modules
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/sy415/workspace/rainbow/build-verify/rainbow_patch_build_module.dir/Release/patch_build.fatbin C:/Users/sy415/workspace/rainbow/build-verify/tests/smoke/Release/modules/patch_build.fatbin
+if %errorlevel% neq 0 goto :cmEnd
+"C:\Program Files\CMake\bin\cmake.exe" -E copy_if_different C:/Users/sy415/workspace/rainbow/build-verify/rainbow_optix_smoke_module.dir/Release/optix_smoke.optixir C:/Users/sy415/workspace/rainbow/build-verify/tests/smoke/Release/modules/optix_smoke.optixir
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
+^C:\USERS\SY415\WORKSPACE\RAINBOW\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" -SC:/Users/sy415/workspace/rainbow -BC:/Users/sy415/workspace/rainbow/build-verify --check-stamp-file C:/Users/sy415/workspace/rainbow/build-verify/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

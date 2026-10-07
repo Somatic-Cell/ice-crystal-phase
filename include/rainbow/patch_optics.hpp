@@ -11,6 +11,7 @@
 #include <span>
 #include <iosfwd>
 #include <vector>
+#include <stdexcept>
 
 namespace rainbow
 {
@@ -47,15 +48,27 @@ public:
     // extension without modifying geometry or the original query buffers.
     void enable_folded_patches(bool enabled) noexcept { folded_enabled_ = enabled; }
     void set_folded_patch_config(const FoldedPatchConfig& config);
-    [[nodiscard]] const FoldedPatchStatistics& folded_statistics() const noexcept { return folded_statistics_; }
+    [[nodiscard]] const FoldedPatchStatistics& folded_statistics() const
+    { if(has_result_ && !has_host_result_) throw std::logic_error("Bulk statistics unavailable for device-only evaluation."); return folded_statistics_; }
     void evaluate(const PatchAccel& source, const PatchQuery& query,
                   const RaindropTraceConfig& config);
     // Explicit new mode; the original evaluate()/write_csv() semantics remain.
     void evaluate_wave(const PatchAccel& source, const PatchQuery& query,
                        const RaindropTraceConfig& config, const WaveOpticsSettings& settings = {});
+    // Device-resident result: no bulk optical/focal/diffraction readback.
+    // Legacy evaluate()/evaluate_wave() retain their existing readback contract.
+    void evaluate_device(const PatchAccel&, const PatchQuery&, const RaindropTraceConfig&);
+    void evaluate_wave_device(const PatchAccel&, const PatchQuery&, const RaindropTraceConfig&,
+                              const WaveOpticsSettings& settings = {});
+    [[nodiscard]] bool has_host_result() const noexcept { return has_host_result_; }
+    [[nodiscard]] const QueryDirectionGrid* direction_grid() const noexcept
+    { return has_grid_ ? &grid_ : nullptr; }
+    [[nodiscard]] const DeviceBuffer<FocalOpticalResult>& focal_results() const noexcept { return focal_results_; }
+    [[nodiscard]] const DeviceBuffer<DiffractionResult>& diffraction_results() const noexcept { return diffraction_results_; }
     void write_wave_csv(const std::filesystem::path& path) const;
     [[nodiscard]] bool has_wave_result() const noexcept { return has_wave_result_; }
-    [[nodiscard]] const WaveOpticsStatistics& wave_statistics() const noexcept { return wave_statistics_; }
+    [[nodiscard]] const WaveOpticsStatistics& wave_statistics() const
+    { if(has_result_ && !has_host_result_) throw std::logic_error("Bulk statistics unavailable for device-only evaluation."); return wave_statistics_; }
     [[nodiscard]] std::span<const FocalOpticalResult> host_focal_results() const noexcept { return host_focal_; }
     [[nodiscard]] std::span<const DiffractionResult> host_diffraction_results() const noexcept { return host_diffraction_; }
     void write_csv(const std::filesystem::path& path) const;
@@ -63,13 +76,14 @@ public:
     [[nodiscard]] bool has_result() const noexcept { return has_result_; }
     [[nodiscard]] const DeviceBuffer<PatchOpticalResult>& results() const noexcept { return results_; }
     [[nodiscard]] std::span<const PatchOpticalResult> host_results() const noexcept { return host_results_; }
-    [[nodiscard]] const PatchOpticsStatistics& statistics() const noexcept { return statistics_; }
+    [[nodiscard]] const PatchOpticsStatistics& statistics() const
+    { if(has_result_ && !has_host_result_) throw std::logic_error("Bulk statistics unavailable for device-only evaluation."); return statistics_; }
     void close();
     [[nodiscard]] bool close_noexcept() noexcept;
 
 private:
     void synchronize();
-    void evaluate_impl(const PatchAccel&, const PatchQuery&, const RaindropTraceConfig&, const WaveOpticsSettings*);
+    void evaluate_impl(const PatchAccel&, const PatchQuery&, const RaindropTraceConfig&, const WaveOpticsSettings*, bool readback = true);
     void run_diffraction();
     FoldedPatchView prepare_folded(const PatchAccel&, const FocalPhaseConfig&, bool with_focal);
     void collect_folded_statistics(bool with_focal);
@@ -94,7 +108,7 @@ private:
     WaveOpticsSettings wave_settings_{};
     DiffractionConfig diffraction_config_{};
     WaveOpticsStatistics wave_statistics_{};
-    bool has_wave_result_ = false;
+    bool has_wave_result_ = false, has_host_result_ = false;
     std::vector<PatchOpticalResult> host_results_;
     std::vector<Vec3> host_directions_; // copy of existing HOST metadata, not GPU readback
     RaindropTraceConfig config_{};

@@ -1,0 +1,5 @@
+C:\Users\sy415\workspace\rainbow\tests\test_phase_cuda.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_phase_cuda_tests.dir\Release\test_phase_cuda.obj
+C:\Users\sy415\workspace\rainbow\src\cuda_driver.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_phase_cuda_tests.dir\Release\cuda_driver.obj
+C:\Users\sy415\workspace\rainbow\src\cuda_module.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_phase_cuda_tests.dir\Release\cuda_module.obj
+C:\Users\sy415\workspace\rainbow\src\cuda_error.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_phase_cuda_tests.dir\Release\cuda_error.obj
+C:\Users\sy415\workspace\rainbow\src\read_binary_file.cpp;C:\Users\sy415\workspace\rainbow\build-verify\tests\rainbow_phase_cuda_tests.dir\Release\read_binary_file.obj

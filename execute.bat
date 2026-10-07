@@ -74,23 +74,17 @@ if not exist outputs mkdir outputs
 
 if not exist outputs\unpolarized_a1_g129 mkdir outputs\unpolarized_a1_g129
 
-build\Release\rainbow_trace.exe ^
-    build\Release\modules\raindrop_trace.optixir ^
-    outputs\unpolarized_a1_g129\vertices.csv ^
+build\Release\rainbow_generate.exe ^
+    --out datasets\drop_a1_i20_700nm_g3001 ^
     --radius-mm 1.0 ^
     --wavelength-nm 700 ^
     --ior 1.3314 ^
     --grid 3001 ^
     --inclination-deg 20 ^
-    --patch-module build\Release\modules\patch_build.fatbin ^
-    --query-module build\Release\modules\patch_query.optixir ^
     --query-theta 900 ^
     --query-phi 1800 ^
-    --query-csv outputs\unpolarized_a1_g129\queries.csv ^
-    --optics-module build\Release\modules\patch_optics.fatbin ^
-    --optics-csv outputs\unpolarized_a1_g129\optics.csv ^
-    --wave-csv outputs\unpolarized_a1_g129\wave.csv ^
+    --stage diffraction ^
     --focal-offsets 0,0,0,0 ^
-    > outputs\unpolarized_a1_g129\run.log 2>&1
+    --allow-underresolved
 
 echo Exit code: %ERRORLEVEL%

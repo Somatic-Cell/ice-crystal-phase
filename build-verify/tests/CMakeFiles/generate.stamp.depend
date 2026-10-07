@@ -1,0 +1,11 @@
+# CMake generation dependency list for this directory.
+C:/Users/sy415/workspace/rainbow/tests/CMakeLists.txt
+C:/Users/sy415/workspace/rainbow/tests/folded_patch_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/optical_interpolation_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/patch_build_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/patch_failure_report_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/patch_optics_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/patch_query_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/raindrop_trace_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/unpolarized_tests.cmake
+C:/Users/sy415/workspace/rainbow/tests/wave_optics_tests.cmake
