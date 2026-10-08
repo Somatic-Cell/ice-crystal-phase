@@ -172,3 +172,9 @@ option(ICE_BUILD_HEX_TRACE "Build the additive hexagonal-prism tracer" ON)
 if(ICE_BUILD_HEX_TRACE)
     add_subdirectory(hex_trace)
 endif()
+
+# M2: oriented hexagonal-crystal flux accumulation and compatible phase CDFs.
+option(ICE_BUILD_HEX_PHASE "Build hexagonal crystal orientation/CDF generation" ON)
+if(ICE_BUILD_HEX_PHASE)
+    add_subdirectory(hex_phase)
+endif()

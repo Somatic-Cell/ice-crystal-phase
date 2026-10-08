@@ -1,4 +1,5 @@
 #include <rainbow/phase_cdf.hpp>
+#include <rainbow/cuda_host_upload.hpp>
 #include <rainbow/phase_cdf_math.hpp>
 #include <rainbow/npy_writer.hpp>
 #include <rainbow/patch_optics.hpp>
@@ -30,6 +31,56 @@ std::string describe(const PhaseCdfReduction& s)
         << ", underresolved=" << s.underresolved << ", malformed=" << s.malformed
         << ", first_problem=" << s.first_problem << ", L1=" << s.l1_error
         << ", lost_mass=" << s.lost_mass << ", weight_underflow=" << s.weight_underflow;
+    return out.str();
+}
+std::string describe_moment(const PhaseMomentSum& value, const PhaseStorageParams& p)
+{
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::setprecision(17)
+        << " mass=" << value.mass << " axial=" << value.axial
+        << " weight_underflow=" << value.weight_underflow
+        << " grid=" << p.nt << 'x' << p.np << " count=" << p.input.count
+        << " divisor=" << p.divisor;
+    return out.str();
+}
+// Failure-only readback of coordinate metadata, not of the optical table.
+// A diagnostic failure must never hide the original failed moment gate.
+std::string inspect_moment_edges(const CudaContext& context,
+    const PhaseStorageParams& p, std::span<const double> expected)
+{
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out << std::setprecision(17);
+    try
+    {
+        if(!p.fine_edges || expected.size()!=std::size_t(p.nt)+1)
+            return " edge_inspection=unavailable";
+        context.make_current();
+        std::vector<double> actual(expected.size());
+        RAINBOW_CUDA_CHECK(cuMemcpyDtoH(actual.data(),
+            reinterpret_cast<CUdeviceptr>(p.fine_edges), actual.size()*sizeof(double)));
+        std::size_t mismatches=0, invalid_intervals=0, first=actual.size();
+        for(std::size_t i=0;i<actual.size();++i)
+        {
+            if(actual[i]!=expected[i])
+            {
+                ++mismatches;
+                if(first==actual.size()) first=i;
+            }
+            if(i && !(std::isfinite(actual[i-1]) && std::isfinite(actual[i])
+                      && actual[i]>actual[i-1])) ++invalid_intervals;
+        }
+        out << " edge_mismatches=" << mismatches
+            << " invalid_edge_intervals=" << invalid_intervals;
+        if(first<actual.size())
+            out << " first_edge=" << first << " expected=" << expected[first]
+                << " observed=" << actual[first];
+    }
+    catch(const std::exception& e)
+    {
+        out << " edge_inspection_failed=" << e.what();
+    }
     return out.str();
 }
 const char* stage_name(PhaseDensityStage stage) noexcept
@@ -262,7 +313,7 @@ void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,co
     host_edges_=make_phase_u_edges(nt);
     edges_.allocate(host_edges_.size());
     // This O(Ntheta) coordinate metadata is not an optical readback.
-    RAINBOW_CUDA_CHECK(cuMemcpyHtoD(edges_.address(),host_edges_.data(),edges_.byte_size()));
+    upload_host_to_device_sync(context_, edges_.address(), host_edges_.data(), edges_.byte_size());
 
     PhaseCdfBuildParams p{};
     p.input=input;p.u_edges=edges_.data();p.input_summary=input_summary_.data();
@@ -329,14 +380,15 @@ void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,co
     sp.out_nt=out_nt;sp.out_np=out_np;
     const auto source=measure(sp,"phase_storage_measure");
     if(source.weight_underflow || !(std::isfinite(source.mass)&&source.mass>0&&std::isfinite(source.axial)))
-        throw std::runtime_error("Invalid source angular moment.");
+        throw std::runtime_error("Invalid source angular moment." + describe_moment(source,sp)
+                + inspect_moment_edges(context_,sp,host_edges_));
     storage_statistics_.g_source=source.axial/source.mass;
     storage_statistics_.g_filtered=storage_statistics_.g_source;
     const bool transformed=sigma>0 || out_nt!=nt || out_np!=np;
     if(transformed)
     {
         fine_edges_.allocate(host_edges_.size());
-        RAINBOW_CUDA_CHECK(cuMemcpyHtoD(fine_edges_.address(),host_edges_.data(),fine_edges_.byte_size()));
+        upload_host_to_device_sync(context_, fine_edges_.address(), host_edges_.data(), fine_edges_.byte_size());
         sp.fine_edges=fine_edges_.data();
         fine_values_.allocate(count);sp.output=fine_values_.data();
         void* storage_args[]={&sp};
@@ -352,7 +404,8 @@ void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,co
         sp.input={};sp.input.scalar=sp.fine_values;sp.input.count=count;sp.divisor=1;
         const auto filtered=measure(sp,"phase_storage_measure");
         if(filtered.weight_underflow || !(std::isfinite(filtered.mass)&&filtered.mass>0&&std::isfinite(filtered.axial)))
-            throw std::runtime_error("Storage filtering produced an invalid angular moment.");
+            throw std::runtime_error("Storage filtering produced an invalid angular moment." + describe_moment(filtered,sp)
+                + inspect_moment_edges(context_,sp,host_edges_));
         storage_statistics_.g_filtered=filtered.axial/filtered.mass;
         storage_statistics_.gaussian_integral_relative_change=filtered.mass/source.mass-1.0;
         if(out_nt!=nt || out_np!=np)
@@ -364,12 +417,13 @@ void PhaseCdf::build(PhaseDensityView input,std::uint32_t nt,std::uint32_t np,co
             host_edges_=std::move(coarse_edges);
             // Previous kernels only read fine_edges_, not edges_.
             synchronize();edges_.close();edges_.allocate(host_edges_.size());
-            RAINBOW_CUDA_CHECK(cuMemcpyHtoD(edges_.address(),host_edges_.data(),edges_.byte_size()));
+            upload_host_to_device_sync(context_, edges_.address(), host_edges_.data(), edges_.byte_size());
             auto cp=sp;cp.input={};cp.input.scalar=coarse_values_.data();cp.input.count=std::uint64_t(out_nt)*out_np;
             cp.nt=out_nt;cp.np=out_np;cp.fine_edges=edges_.data();
             const auto coarse=measure(cp,"phase_storage_measure");
             if(coarse.weight_underflow || !(std::isfinite(coarse.mass)&&coarse.mass>0&&std::isfinite(coarse.axial)))
-                throw std::runtime_error("Storage aggregation produced an invalid angular moment.");
+                throw std::runtime_error("Storage aggregation produced an invalid angular moment." + describe_moment(coarse,cp)
+                + inspect_moment_edges(context_,cp,host_edges_));
             storage_statistics_.aggregation_integral_relative_change=coarse.mass/filtered.mass-1.0;
             if(::fabs(storage_statistics_.aggregation_integral_relative_change)>1e-10)
                 throw std::runtime_error("Storage aggregation failed mass-conservation check.");

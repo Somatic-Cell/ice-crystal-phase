@@ -1,0 +1,5 @@
+# Equal NUMBER fractions, deliberately different projected areas and ray counts.
+# Identity and active +90 degree rotation about +z; body +y becomes -x.
+qw,qx,qy,qz,weight,samples,seed
+1,0,0,0,0.5,1024,12345
+0.7071067811865475244,0,0,0.7071067811865475244,0.5,2048,54321

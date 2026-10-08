@@ -1,11 +1,12 @@
-.\build\hex_trace\Release\ice_trace_hex.exe ^
-    --out out\hex_m1 ^
+.\build\hex_phase\Release\ice_generate_phase.exe ^
+    --out out\phase_m2_fine ^
+    --orientations hex_phase\configs\two_orientations.csv ^
     --radius-mm 0.1 ^
     --length-mm 0.2 ^
     --ki 1 -0.4 0.3 ^
     --ior 1.31 ^
     --wavelength-nm 550 ^
-    --samples 4096 ^
-    --seed 12345 ^
-    --max-internal-hits 1024 ^
-    --tail-tolerance 1e-12
+    --theta 72 ^
+    --phi 144 ^
+    --cdf-theta 72 ^
+    --cdf-phi 144

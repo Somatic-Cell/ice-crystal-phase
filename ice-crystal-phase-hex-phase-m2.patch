@@ -1,0 +1,2160 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ff8646fb9b309a7aa85926cb0fd5ecf7dd2b6353..0ae4d02ea00c0018f72db581d9f3602baf053759 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -172,3 +172,9 @@ option(ICE_BUILD_HEX_TRACE "Build the additive hexagonal-prism tracer" ON)
+ if(ICE_BUILD_HEX_TRACE)
+     add_subdirectory(hex_trace)
+ endif()
++
++# M2: oriented hexagonal-crystal flux accumulation and compatible phase CDFs.
++option(ICE_BUILD_HEX_PHASE "Build hexagonal crystal orientation/CDF generation" ON)
++if(ICE_BUILD_HEX_PHASE)
++    add_subdirectory(hex_phase)
++endif()
+diff --git a/hex_phase/CMakeLists.txt b/hex_phase/CMakeLists.txt
+new file mode 100644
+index 0000000000000000000000000000000000000000..3247e1837b8844e80cb5361a11b2715b43b7e73f
+--- /dev/null
++++ b/hex_phase/CMakeLists.txt
+@@ -0,0 +1,133 @@
++cmake_minimum_required(VERSION 3.27)
++if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
++    project(IceHexPhase LANGUAGES CXX)
++    include(CTest)
++    set(_ice_phase_cuda_default OFF)
++else()
++    set(_ice_phase_cuda_default ${ICE_HEX_ENABLE_CUDA})
++endif()
++option(ICE_PHASE_ENABLE_CUDA "Build GPU histogram and existing rainbow CDF integration (root build)" ${_ice_phase_cuda_default})
++option(ICE_PHASE_BUILD_TESTS "Build composition/CDF tests" ${BUILD_TESTING})
++set(ICE_PHASE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
++get_filename_component(ICE_PHASE_REPO "${ICE_PHASE_ROOT}/.." ABSOLUTE)
++if(NOT TARGET ice_hex_trace_core)
++    if(NOT CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
++        message(FATAL_ERROR "M2 requires M1: enable ICE_BUILD_HEX_TRACE.")
++    endif()
++    if(ICE_PHASE_ENABLE_CUDA)
++        message(FATAL_ERROR "Use the repository root for CUDA M2 (it reuses rainbow_phase_dataset); standalone is CPU only.")
++    endif()
++    if(DEFINED ICE_HEX_ENABLE_CUDA AND ICE_HEX_ENABLE_CUDA)
++        message(FATAL_ERROR "Standalone CPU M2 requires ICE_HEX_ENABLE_CUDA=OFF; no automatic override of CUDA settings.")
++    endif()
++    set(ICE_HEX_ENABLE_CUDA OFF CACHE BOOL "Standalone M2 host reference")
++    add_subdirectory("${ICE_PHASE_REPO}/hex_trace" "hex_trace_dependency")
++endif()
++function(ice_phase_configure target)
++    target_compile_features(${target} PUBLIC cxx_std_20)
++    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
++    target_include_directories(${target} PUBLIC "${ICE_PHASE_ROOT}/include" "${ICE_PHASE_REPO}/include")
++    if(WIN32)
++        target_compile_definitions(${target} PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
++    endif()
++    if(MSVC)
++        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/utf-8;/W4;/Zc:__cplusplus;/fp:precise>")
++    else()
++        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-fno-fast-math;-ffp-contract=off>")
++    endif()
++endfunction()
++add_library(ice_phase_core STATIC src/orientation_plan.cpp src/phase_table.cpp src/phase_generate.cpp
++    "${ICE_PHASE_REPO}/src/npy_writer.cpp")
++target_link_libraries(ice_phase_core PUBLIC ice_hex_trace_core)
++ice_phase_configure(ice_phase_core)
++# Source fingerprint is captured at configure time; it is not a binary or GPU execution hash.
++file(GLOB_RECURSE _ice_sources CONFIGURE_DEPENDS
++    "${ICE_PHASE_ROOT}/include/*.hpp" "${ICE_PHASE_ROOT}/src/*.cpp" "${ICE_PHASE_ROOT}/device/*.cu" "${ICE_PHASE_ROOT}/apps/*.cpp"
++    "${ICE_PHASE_REPO}/hex_trace/include/*.hpp" "${ICE_PHASE_REPO}/hex_trace/src/*.cpp" "${ICE_PHASE_REPO}/hex_trace/device/*.cu")
++list(APPEND _ice_sources "${ICE_PHASE_REPO}/src/npy_writer.cpp" "${ICE_PHASE_REPO}/include/rainbow/phase_cdf_math.hpp")
++foreach(_source IN ITEMS "src/phase_cdf.cpp" "device/phase_cdf.cu" "include/rainbow/phase_cdf_data.hpp" "include/rainbow/phase_storage_math.hpp")
++    if(EXISTS "${ICE_PHASE_REPO}/${_source}")
++        list(APPEND _ice_sources "${ICE_PHASE_REPO}/${_source}")
++    endif()
++endforeach()
++list(APPEND _ice_sources "${ICE_PHASE_ROOT}/CMakeLists.txt" "${ICE_PHASE_REPO}/hex_trace/CMakeLists.txt" "${ICE_PHASE_REPO}/CMakeLists.txt")
++list(SORT _ice_sources)
++set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_ice_sources})
++set(_ice_hash_input "")
++foreach(_source IN LISTS _ice_sources)
++    file(SHA256 "${_source}" _hash)
++    file(RELATIVE_PATH _relative "${ICE_PHASE_REPO}" "${_source}")
++    string(APPEND _ice_hash_input "${_relative}:${_hash}\n")
++endforeach()
++string(SHA256 _ice_source_hash "${_ice_hash_input}")
++target_compile_definitions(ice_phase_core PRIVATE ICE_PHASE_SOURCE_FINGERPRINT="${_ice_source_hash}")
++add_executable(ice_generate_phase_cpu apps/generate_hex_phase.cpp)
++target_link_libraries(ice_generate_phase_cpu PRIVATE ice_phase_core)
++ice_phase_configure(ice_generate_phase_cpu)
++
++if(ICE_PHASE_ENABLE_CUDA)
++    if(NOT TARGET ice_hex_trace_cuda OR NOT TARGET rainbow_phase_dataset OR NOT TARGET rainbow_phase_cdf_module)
++        message(FATAL_ERROR "CUDA M2 needs root rainbow_phase_dataset and ICE_HEX_ENABLE_CUDA=ON. No CPU fallback.")
++    endif()
++    add_library(ice_phase_cuda STATIC src/phase_cuda.cpp)
++    target_link_libraries(ice_phase_cuda PUBLIC ice_phase_core ice_hex_trace_cuda)
++    ice_phase_configure(ice_phase_cuda)
++    add_library(ice_phase_accumulate_module OBJECT device/phase_accumulate.cu)
++    target_include_directories(ice_phase_accumulate_module PRIVATE
++        "${ICE_PHASE_ROOT}/include" "${ICE_PHASE_REPO}/hex_trace/include")
++    set_target_properties(ice_phase_accumulate_module PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON
++        CUDA_EXTENSIONS OFF CUDA_FATBIN_COMPILATION ON CUDA_SEPARABLE_COMPILATION OFF CUDA_RUNTIME_LIBRARY None)
++    target_compile_options(ice_phase_accumulate_module PRIVATE
++        "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--ftz=false;--prec-div=true;--prec-sqrt=true;--fmad=false>")
++    if(MSVC)
++        target_compile_options(ice_phase_accumulate_module PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
++    endif()
++    function(ice_phase_stage executable)
++        add_custom_target(${executable}_stage
++            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:${executable}>/modules"
++            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_OBJECTS:ice_hex_trace_module>"
++                "$<TARGET_FILE_DIR:${executable}>/modules/hex_trace.fatbin"
++            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_OBJECTS:ice_phase_accumulate_module>"
++                "$<TARGET_FILE_DIR:${executable}>/modules/phase_accumulate.fatbin"
++            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_OBJECTS:rainbow_phase_cdf_module>"
++                "$<TARGET_FILE_DIR:${executable}>/modules/phase_cdf.fatbin"
++            COMMAND_EXPAND_LISTS VERBATIM)
++        add_dependencies(${executable}_stage ice_hex_trace_module ice_phase_accumulate_module rainbow_phase_cdf_module)
++        add_dependencies(${executable} ${executable}_stage)
++    endfunction()
++    add_executable(ice_generate_phase apps/generate_hex_phase.cpp)
++    target_compile_definitions(ice_generate_phase PRIVATE ICE_PHASE_HAS_CUDA=1)
++    target_link_libraries(ice_generate_phase PRIVATE ice_phase_cuda rainbow_phase_dataset)
++    ice_phase_configure(ice_generate_phase)
++    ice_phase_stage(ice_generate_phase)
++endif()
++if(ICE_PHASE_BUILD_TESTS)
++    enable_testing()
++    add_executable(ice_phase_host_tests tests/phase_tests.cpp)
++    target_link_libraries(ice_phase_host_tests PRIVATE ice_phase_core)
++    ice_phase_configure(ice_phase_host_tests)
++    add_test(NAME ice_phase_host COMMAND ice_phase_host_tests)
++    find_package(Python3 COMPONENTS Interpreter QUIET)
++    if(Python3_Interpreter_FOUND)
++        execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import numpy" RESULT_VARIABLE _numpy OUTPUT_QUIET ERROR_QUIET)
++        if(_numpy EQUAL 0)
++            add_test(NAME ice_phase_cli_numpy COMMAND "${Python3_EXECUTABLE}" "${ICE_PHASE_ROOT}/tests/phase_cli_test.py"
++                "$<TARGET_FILE:ice_generate_phase_cpu>" "${ICE_PHASE_REPO}")
++        else()
++            message(STATUS "NumPy absent: ice_phase_cli_numpy is NOT registered.")
++        endif()
++        add_test(NAME ice_phase_orientation_tool COMMAND "${Python3_EXECUTABLE}" "${ICE_PHASE_ROOT}/tests/orientation_tool_test.py"
++            "${ICE_PHASE_ROOT}/tools/make_orientations.py")
++    endif()
++    if(ICE_PHASE_ENABLE_CUDA)
++        add_executable(ice_phase_cuda_tests tests/phase_cuda_tests.cpp)
++        target_link_libraries(ice_phase_cuda_tests PRIVATE ice_phase_cuda rainbow_phase_dataset)
++        ice_phase_configure(ice_phase_cuda_tests)
++        ice_phase_stage(ice_phase_cuda_tests)
++        add_test(NAME ice_phase_cuda COMMAND ice_phase_cuda_tests)
++        if(Python3_Interpreter_FOUND AND _numpy EQUAL 0)
++            add_test(NAME ice_phase_cuda_cli_numpy COMMAND "${Python3_EXECUTABLE}" "${ICE_PHASE_ROOT}/tests/phase_cli_test.py"
++                "$<TARGET_FILE:ice_generate_phase>" "${ICE_PHASE_REPO}")
++        endif()
++    endif()
++endif()
+diff --git a/hex_phase/README.md b/hex_phase/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..a0e62c5c086ab01fafafa269b4a02cd9a188ece0
+--- /dev/null
++++ b/hex_phase/README.md
+@@ -0,0 +1,243 @@
++# 六角氷柱の配向合成と CDF 出力 — M2
++
++## 適用対象と到達点
++
++`a9538941dcb9df2de6a4130fa66f625f0133c949` に **hex-trace-m1 差分を適用済み**の
++`ice-crystal-phase` が対象です。M1 の追跡・偏光・交差処理と既存の雨滴ソルバは変更しません。
++追加は `hex_phase/` とルート CMake の追加ブロックです。GitHub への push は行っていません。
++
++この段階では、固定の入射進行方向・波長・形状に対して、任意の重み付き配向列を合成し、
++既存 `PhaseRecord` で読み込める4ファイルを生成します。
++
++```
++metadata.json
++phi_cdf.npy                 [Nphi+1]
++theta_given_phi_cdf.npy     [Nphi, Ntheta+1]
++u_edges.npy                [Ntheta+1]
++```
++
++FP64 / little endian / C order、phi 周辺 → theta 条件付き、
++`u=(1-cos(theta))/2`、セル内立体角密度一定という契約を維持します。
++**最終レコードに点群 CSV は追加しません。配向 CSV は再現用に別途保管してください。**
++メタデータには入力 CSV の SHA256 を保存します。巨大な配向列を metadata に埋め込まず、
++既存 reader の 1 MiB 上限も維持します。
++
++### 物理・数値モデル
++
++- M1 と同じ非吸収・等方媒質の幾何光学。二入力の光束 Jones 応答を伝播し、無偏光入射の強度を合成します。
++- 内部全反射の s/p 相対位相は保持しますが、異なる経路・粒子姿勢の複素振幅は足しません。
++- `--ior` は **指定波長で呼び出し側が評価した実屈折率**です。自動の氷の分散式ではありません。
++  波長ラベルだけを変えて同じ `--ior` を使っても分散は生じません。
++- 吸収・複屈折・有限粒径回折・経路間干渉・表面粗さを追加していません。
++- 雨滴の Table II フィルタも、追加の球面 Gaussian も適用しません。
++- 対称性による入射方向や姿勢の削減はまだ行いません。全ての指定姿勢をそのまま処理する比較基準です。
++- 配向 CSV は有限の離散測度です。観測分布の選定や連続姿勢積分の収束認定は、この出力成功だけでは行いません。
++
++## ビルド・テスト
++
++### CPU 参照経路（CUDA/OptiX 不要）
++
++リポジトリのルートから実行します。M1 と既存の NPY writer / reader が存在する必要があります。
++
++```powershell
++cmake -S hex_phase -B build-phase-host -DICE_PHASE_ENABLE_CUDA=OFF -DICE_PHASE_BUILD_TESTS=ON
++cmake --build build-phase-host --config Release
++ctest --test-dir build-phase-host -C Release --output-on-failure
++```
++
++CLI 相互運用テストは NumPy がある場合だけ登録します。`ctest -N` で
++`ice_phase_cli_numpy` が含まれることを確認してください。NumPy がない場合、C++ 側テストを
++通しただけで Python reader の相互運用を検証したことにはなりません。
++
++### CUDA 追跡・GPU 集計・既存 GPU CDF
++
++**CUDA M2 はリポジトリルートで構成します。** M1 の standalone CUDA ビルドと異なり、
++既存 `rainbow_phase_dataset` をリンクするためです。既存の CUDA / OptiX / GPU アーキテクチャ設定を維持してください。
++
++```powershell
++cmake -S . -B build -DBUILD_TESTING=ON -DICE_BUILD_HEX_TRACE=ON -DICE_HEX_ENABLE_CUDA=ON -DICE_BUILD_HEX_PHASE=ON -DICE_PHASE_ENABLE_CUDA=ON -DICE_PHASE_BUILD_TESTS=ON
++cmake --build build --config Release --target ice_generate_phase ice_generate_phase_cpu ice_phase_host_tests ice_phase_cuda_tests
++ctest --test-dir build -C Release -R "^ice_phase_" --output-on-failure
++```
++
++`ice_generate_phase.exe` は CUDA 専用、`ice_generate_phase_cpu.exe` は明示的な CPU 参照経路です。
++CUDA の失敗による CPU への自動切り替えはありません。
++CUDA binary の隣に `modules/hex_trace.fatbin`, `phase_accumulate.fatbin`, `phase_cdf.fatbin` を配置する
++CMake target を追加しています。`--modules DIR` で配置先を明示することもできます。
++
++**提供環境では CPU の GCC / Clang / ASan+UBSan を検証しました。CUDA のコンパイル・実行と
++Windows/MSVC は未検証です。ユーザー側で通った M1 のテストは、新規 M2 CUDA コードの検証ではありません。**
++
++## 実行例
++
++まず、付属の2配向・異なるレイ数の例を使用します。Visual Studio generator の配置を想定しています。
++
++```powershell
++.\build\hex_phase\Release\ice_generate_phase.exe --out out\phase_m2 --orientations hex_phase\configs\two_orientations.csv --radius-mm 0.1 --length-mm 0.2 --ki 1 -0.4 0.3 --ior 1.31 --wavelength-nm 550 --theta 72 --phi 144 --cdf-theta 36 --cdf-phi 72
++```
++
++CPU standalone の場合は実行ファイルを次に変更し、それ以外の引数は同じにします。
++
++```text
++.\build-phase-host\Release\ice_generate_phase_cpu.exe
++```
++
++この例の `1.31` は動作検証用の明示的な値であり、氷の 550 nm 光学定数を自動取得した結果ではありません。
++`--radius-mm` は六角形の **外接円半径**、`--length-mm` は柱の **全長**です。
++粒子は原点中心で、body 座標系の柱軸は +y です。`--ki` は ensemble 基準座標系での光の進行方向です。
++正規化した実際の方向を metadata に保存します。
++
++`--theta`, `--phi` は集計する細格子です。`--cdf-theta`, `--cdf-phi` を省略すると同じ解像度で保存します。
++縮約を行う場合、保存解像度は細格子解像度の整数約数に限ります。
++質量保存は形状保存の保証ではないため、`storage_processing.coarsening_tv` を確認してください。
++既定の `--max-coarsening-tv 1` は構造的な上限であって、研究上の許容誤差ではありません。
++
++### 揺らぎを持つテスト用配向列
++
++例えば柱軸が水平面の上下3度以内に分布し、軸まわりの回転を一様にする列は次のように作成できます。
++
++```powershell
++python hex_phase\tools\make_orientations.py --out configs\horizontal_band_test.csv --mode axis-band --half-angle-deg 3 --count 128 --samples-per-orientation 128 --seed 7
++```
++
++生成器の組込み分布は、検証・モデル例に限定した次の4種類です。
++
++| mode | 分布 |
++|---|---|
++| `fixed` | identity 一姿勢。`--count 1` を要求 |
++| `isotropic` | SO(3) の一様分布から独立サンプル |
++| `axis-cone` | body +y 軸が基準 +y から指定半角の円錐内に立体角一様、spin 一様 |
++| `axis-band` | body +y 軸が水平面の上下指定半角の帯内に立体角一様、spin 一様 |
++
++cone / band は **気象観測にフィットした Gaussian の代替ではありません**。
++文献に基づく分布を使用する場合は、その定義に基づく姿勢・確率質量を同じ CSV 契約で与えます。
++連続分布の姿勢数による収束と、各姿勢内の入射位置サンプル数による収束は別々に検証してください。
++
++## 配向 CSV の厳密な契約
++
++UTF-8（BOM なし）、ヘッダは次の7列です。CRLF と行先頭 `#` のコメントを扱います。
++
++```csv
++qw,qx,qy,qz,weight,samples,seed
++1,0,0,0,0.5,1024,12345
++0.7071067811865475244,0,0,0.7071067811865475244,0.5,2048,54321
++```
++
++`qw,qx,qy,qz` は scalar-first Hamilton quaternion による **body → ensemble** の能動回転です。
++単位長を要求し、二乗ノルムと1との差が2e-12以内の丸め誤差だけを許します。任意長の4ベクトルは受け付けません。
++行の順序・`samples`・`seed` が有限サンプル計算を定義します。
++
++`weight` は結晶 **個数分布の確率質量**です。正値だけを受け付け、総和1を2e-12以内で要求します。
++既に正規化された値の丸め差だけを総和で割って除き、その係数を保存します。
++ゼロ質量の姿勢は行を省略します。
++
++- 姿勢 PDF の点評価値そのものを `weight` に入れません。
++- 求積の場合は、SO(3) の測度・必要な Jacobian・求積重みまで含めた確率質量を与えます。
++- 配向分布自体から独立サンプルする場合は `weight=1/M` です。さらに同じ配向 PDF を掛けません。
++- `samples` が各姿勢で違ってもよく、多い姿勢を余分に重くすることはありません。
++- 結晶への衝突確率に面積を反映済みの姿勢分布を、この「個数分布」入力にそのまま渡しません。
++
++各姿勢 R_j の入射方向は `R_j^T ki`、出射方向は `R_j ko_body` です。
++その出射サンプルの球面セルへの寄与は
++
++```
++weight_j * projected_area(R_j^T ki) / samples_j * power_fraction
++```
++
++です。初回入射点は M1 と同じく可視面の投影面積に比例して直接生成するため、
++ヒット率をさらに掛けることはありません。
++
++## 数値処理の順序
++
++```
++配向CSV
++  -> 各姿勢の body 入射方向と投影面積
++  -> M1 の追跡（CPU または CUDA）
++  -> レイ別監査を検査
++  -> 出射方向を ensemble 基準へ戻して、未正規化光束を加算
++  -> 極の成分を表現規約に従って割り当て
++  -> 密度 D = セル光束 W / セル立体角
++  -> CDF の構築・監査・保存
++```
++
++GPU では出射点群を CPU にダウンロードしません。出射点の生成は M1 の GPU CSR バッファ、
++質量集計は GPU FP64 `atomicAdd`、密度バッファは既存の
++`rainbow::PhaseCdf::build(PhaseDensityView, ...)` の `Scalar` 入口へ渡します。
++`Scalar` は後段へ渡す密度の形式であり、追跡中の偏光を無視する指定ではありません。
++追跡から CDF 構築までの途中で CPU に回収するのは、レイ監査情報と小さい集計統計です。
++最終 CDF 配列は既存 writer が分割して読み戻し、ファイルへ保存します。
++
++**既存 CDF は入力密度にセル立体角を掛けます。セル光束をそのまま渡すと二重計上になります。**
++この誤接続が一様球面分布を変えてしまうこともテストしています。
++
++CPU 参照経路は、セル質量を補償加算し、保守的に縮約してから順序付き FP64 prefix sum を作ります。
++こちらは既存 GPU CDF の CPU 実行ではなく、同じ出力測度・セル契約に対する独立した実装です。
++GPU テストで、既存 CDF に通した結果とのセル確率・g・縮約 TV を比較します。
++
++### 丸め誤差と極・セル境界
++
++GPU の atomic 加算順序は固定していないため、ビット一致は保証しません。
++独立なレイ光束監査から得た総光束と、ヒストグラム積分を比較します。
++`atomic_absorbed_addend_mass_mm2` は加算で消えた微小項の診断値で、厳密な誤差上界ではありません。
++
++球面セル境界のごく近傍では、閉開区間の割当てを CPU/CUDA 間で安定化する丸め規則を使います。
++u 境界は64 epsの座標スケール、phi は64 epsの格子スケールを上限とし、さらに **セル幅の1e-7以下**に制限します。
++変更したサンプル数を `boundary_snapped_samples` に記録します。物理的な平滑化や確率 floor ではありません。
++
++幾何光学の前方・後方デルタは削除しません。進行軸まわりの横成分が `256*DBL_EPSILON` 以下のものを
++極の丸め域として別に集計し、細格子の最初／最後の極冠内に方位角一様で配分します。
++undefined な phi の任意値による人工的な一本の子午線ピークを作らないための、**有限セル表現の規約**です。
++これは回折による光学的な広がりではありません。細格子を変えるとこの表現幅も変わります。
++
++`hg.g` は保存した CDF からの厳密なセル内平均余弦
++`1-U[i]-U[i+1]` で計算します。元の点群の一次モーメント `histogram.g_rays` とは区別します。
++また `sampling_frame_columns` の列は `[e0,e1,ki]`、JSON の外側配列は行です。
++その行列はサンプリング局所座標から **ensemble 基準座標**へ写します。
++一つの結晶の body frame と取り違えず、読む側で別の ONB に置き換えないでください。
++
++## 光束収支と失敗時の扱い
++
++各姿勢の平均投影面積を個数重みで平均し、非吸収・幾何学的衝突モデルとして
++`Csca=Cext=mean_Aproj`, `Cabs=0` を保存します。Maxwell の波動散乱断面積ではありません。
++実際に回収した光束積分と未回収光束積分は `transport_audit` に別々に保存します。
++
++CDF は全姿勢の **回収済み光束を合成した後**に一度だけ正規化します。その前に必ず次を検査します。
++
++- M1 の全レイが許容終了状態で、光束収支と各界面の診断が有限かつ許容範囲か。
++- 全ての計画姿勢・レイ・出射点が処理されたか。
++- 面積重み付きの未回収比率が `--max-unresolved-fraction` 以下か。
++- ヒストグラム積分が独立なレイ監査の回収光束と一致するか。
++- CDF 丸め誤差・失われた確率質量・縮約 TV が指定値以内か。
++
++既定値は、最大内部相互作用1024、レイ別残存閾値1e-12、全体未回収比率1e-10、
++光束収支1e-10、ヒストグラム積分相対誤差1e-10、CDF L1誤差1e-10、CDF消失質量1e-12です。
++1024回で収束する保証はありません。上限到達は失敗とし、自動でレイ数・格子を減らしません。
++
++生成中は `<out>.part` へ書きます。成功時だけ最終ディレクトリへ改名します。
++生成時の失敗は通常終了コード2と `failure.json`、引数・事前検査の失敗は終了コード1です。
++ディスク自体の書き込み失敗では診断ファイルも書けないことがあります。
++既存出力・既存 `.part` は上書き・削除しません。
++
++**`complete=true` は実行と構造監査の完了です。物理モデル誤差、配向積分誤差、レイ位置積分誤差、
++角度離散化、保存時の縮約、NF近似の誤差は別々に評価する必要があります。**
++
++## 主なファイル
++
++| ファイル | 役割 |
++|---|---|
++| `orientation_plan.cpp` | CSV・quaternion・個数重みの検証、SHA256 |
++| `phase_math.hpp` | CPU/CUDA 共通の回転・セル対応付け |
++| `phase_table.cpp` | CPU 質量集計と独立した CDF 参照実装 |
++| `phase_accumulate.cu` / `phase_cuda.cpp` | GPU 集計と密度バッファ化 |
++| `phase_generate.cpp` | 合成の監査・metadata |
++| `generate_hex_phase.cpp` | 全体の実行と既存 CDF 接続 |
++| `phase_tests.cpp` | 個数重み・面積・回転・測度・CDF・実追跡のホスト検証 |
++| `phase_cuda_tests.cpp` | CPU/GPU 集計と既存 CDF の比較、極・HDR・不正入力 |
++| `phase_cli_test.py` | 無変更の `PhaseRecord` による相互運用と失敗時の非公開化 |
++
++## 続く検証・拡張
++
++この差分で「追跡 → 配向合成 → 既存形式の参照 CDF」は接続されます。
++残る主要項目は、採用する氷の光学定数と配向分布の文献準拠入力、条件ごとの一括生成、
++独立バッチ・配向数・入射レイ数・角度解像度に対する収束評価です。
++現在の均一円錐／帯のテスト用配向を、観測に基づく配向モデルとして扱わないでください。
+diff --git a/hex_phase/apps/generate_hex_phase.cpp b/hex_phase/apps/generate_hex_phase.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..616be7241e70cbec61a598cd38e6cfd68e2c326e
+--- /dev/null
++++ b/hex_phase/apps/generate_hex_phase.cpp
+@@ -0,0 +1,188 @@
++#include <ice_crystal/phase_generate.hpp>
++#include <rainbow/npy_writer.hpp>
++#if defined(ICE_PHASE_HAS_CUDA)
++#include <ice_crystal/phase_cuda.hpp>
++#include <rainbow/phase_cdf.hpp>
++#endif
++#include <algorithm>
++#include <charconv>
++#include <iostream>
++#include <memory>
++#include <set>
++#include <string_view>
++#include <limits>
++#include <stdexcept>
++
++namespace
++{
++using namespace iceCrystal;
++std::filesystem::path path_utf8(std::string_view s)
++{std::u8string v;for(unsigned char c:s)v+=static_cast<char8_t>(c);return std::filesystem::path(v);}
++template<class T>T number(std::string_view s)
++{
++    T v{};const auto r=std::from_chars(s.data(),s.data()+s.size(),v);
++    if(r.ec!=std::errc{}||r.ptr!=s.data()+s.size())throw std::invalid_argument("Malformed numeric option.");
++    return v;
++}
++struct Options
++{
++    PhaseGenerationSettings settings;
++    std::filesystem::path out,orientations,modules;
++    int device=0;
++};
++Options parse(int argc,char** argv)
++{
++    Options o;auto& s=o.settings;Vec3 ki{};std::uint32_t nt=0,np=0;
++    o.modules=std::filesystem::absolute(path_utf8(argv[0])).parent_path()/"modules";
++    std::set<std::string> seen;
++    for(int i=1;i<argc;++i)
++    {
++        const std::string key=argv[i];if(!seen.insert(key).second)throw std::invalid_argument("Duplicate option: "+key);
++        auto next=[&]()->std::string_view{if(++i>=argc)throw std::invalid_argument("Missing value: "+key);return argv[i];};
++        if(key=="--out")o.out=path_utf8(next());
++        else if(key=="--orientations")o.orientations=path_utf8(next());
++        else if(key=="--modules")o.modules=path_utf8(next());
++        else if(key=="--radius-mm")s.prism.circumradius_mm=number<double>(next());
++        else if(key=="--length-mm")s.prism.length_mm=number<double>(next());
++        else if(key=="--ki"){ki.x=number<double>(next());ki.y=number<double>(next());ki.z=number<double>(next());}
++        else if(key=="--ior")s.interior_index=number<double>(next());
++        else if(key=="--external-ior")s.exterior_index=number<double>(next());
++        else if(key=="--wavelength-nm")s.wavelength_nm=number<double>(next());
++        else if(key=="--theta")nt=number<std::uint32_t>(next());
++        else if(key=="--phi")np=number<std::uint32_t>(next());
++        else if(key=="--cdf-theta")s.out_nt=number<std::uint32_t>(next());
++        else if(key=="--cdf-phi")s.out_np=number<std::uint32_t>(next());
++        else if(key=="--batch-size")s.batch_size=number<std::size_t>(next());
++        else if(key=="--max-output-records")s.max_output_records=number<std::size_t>(next());
++        else if(key=="--max-internal-hits")s.max_internal_hits=number<std::uint32_t>(next());
++        else if(key=="--tail-tolerance")s.tail_tolerance=number<double>(next());
++        else if(key=="--max-unresolved-fraction")s.max_unresolved_fraction=number<double>(next());
++        else if(key=="--max-balance-error")s.max_balance_error=number<double>(next());
++        else if(key=="--max-histogram-relative-error")s.max_histogram_relative_error=number<double>(next());
++        else if(key=="--cdf-max-l1")s.cdf_policy.max_l1_error=number<double>(next());
++        else if(key=="--cdf-max-lost-mass")s.cdf_policy.max_lost_mass=number<double>(next());
++        else if(key=="--max-coarsening-tv")s.cdf_policy.max_coarsening_tv=number<double>(next());
++        else if(key=="--device")o.device=number<int>(next());
++        else throw std::invalid_argument("Unknown option: "+key);
++    }
++    for(const char* k:{"--out","--orientations","--radius-mm","--length-mm","--ki","--ior","--wavelength-nm","--theta","--phi"})
++        if(!seen.contains(k))throw std::invalid_argument(std::string("Required option: ")+k);
++#if !defined(ICE_PHASE_HAS_CUDA)
++    if(seen.contains("--device")||seen.contains("--modules"))throw std::invalid_argument("CPU reference binary does not accept CUDA settings.");
++#endif
++    if(o.device<0)throw std::invalid_argument("Negative CUDA device ordinal.");
++    s.grid=make_phase_grid(nt,np,ki);
++    if(!seen.contains("--cdf-theta"))s.out_nt=nt;
++    if(!seen.contains("--cdf-phi"))s.out_np=np;
++    validate_generation_settings(s);return o;
++}
++int run(const Options& o)
++{
++    const auto& s=o.settings;const auto plan=read_orientation_plan(o.orientations);CompositionAudit audit;
++    // Preflight all nodes before producing any output.
++    for(const auto& node:plan.nodes)
++    {
++        const double area=node_area(s,node),weight=node.weight*area;
++        if(!(weight>0)||!finite_value(weight)||!(weight/double(node.samples)>0))throw std::runtime_error("Orientation area weight over/underflow.");
++        audit.expected_area.add(weight);
++    }
++    rainbow::DatasetDirectory directory(o.out);
++    try
++    {
++#if defined(ICE_PHASE_HAS_CUDA)
++        rainbow::CudaContext context(o.device);HexPrismTracer tracer(context);
++        tracer.load_module(o.modules/"hex_trace.fatbin");
++        PhaseMassAccumulatorCuda histogram(context,s.grid);histogram.load_module(o.modules/"phase_accumulate.fatbin");
++#else
++        PhaseMassAccumulator histogram(s.grid);
++#endif
++        for(std::size_t pose=0;pose<plan.nodes.size();++pose)
++        {
++            const auto& node=plan.nodes[pose];const auto c=node_trace_settings(s,node);
++            const double scale=node.weight*node_area(s,node)/double(node.samples);
++            for(std::uint64_t first=0;first<node.samples;)
++            {
++                const auto count=static_cast<std::size_t>(std::min<std::uint64_t>(s.batch_size,node.samples-first));
++#if defined(ICE_PHASE_HAS_CUDA)
++                tracer.trace(c,first,count,s.max_output_records);
++                const auto rays=tracer.download_audits();
++                record_batch_audit(audit,summarize_phase_rays(rays,s.max_balance_error),scale);
++                histogram.add(tracer.outgoing(),node.rotation,scale);
++#else
++                const auto batch=trace_batch_cpu(c,first,count,s.max_output_records);
++                record_batch_audit(audit,summarize_phase_rays(batch.audits,s.max_balance_error),scale);
++                histogram.add(batch.outgoing,node.rotation,scale);
++#endif
++                first+=count;
++            }
++            ++audit.orientations_done;
++            std::cout<<"orientation="<<pose+1<<'/'<<plan.nodes.size()<<" rays="<<audit.trace.rays<<'\n';
++        }
++        CdfReport report;
++#if defined(ICE_PHASE_HAS_CUDA)
++        histogram.finish();audit.histogram=histogram.statistics();audit.grid_moments=histogram.moments();
++        validate_composition(audit,s,plan);
++        rainbow::PhaseCdf cdf(context);cdf.load_module(o.modules/"phase_cdf.fatbin");
++        rainbow::PhaseDensityView input{};input.stage=rainbow::PhaseDensityStage::Scalar;
++        input.count=histogram.density().element_count();input.scalar=reinterpret_cast<const double*>(histogram.density().address());
++        rainbow::PhaseCdfPolicy policy{};policy.maximum_l1_error=s.cdf_policy.max_l1_error;policy.maximum_lost_mass=s.cdf_policy.max_lost_mass;
++        rainbow::PhaseStorageSettings storage{};storage.theta_count=s.out_nt;storage.phi_count=s.out_np;
++        storage.gaussian_sigma_degrees=0;storage.maximum_coarsening_tv=s.cdf_policy.max_coarsening_tv;
++        cdf.build(input,s.grid.nt,s.grid.np,policy,storage);
++        const auto& p=cdf.storage_statistics();const auto& q=cdf.audit_statistics();
++        report={p.g_source,p.g_stored,p.coarsening_tv,p.cdf_mass,q.l1_error,q.lost_mass,q.maximum_cell_error,p.aggregation_integral_relative_change,q.lost_cells};
++        cdf.write_arrays(directory.staging());const char* backend="cuda_trace_atomic_histogram_existing_rainbow_PhaseCdf";
++#else
++        const auto mass=histogram.masses();audit.histogram=histogram.statistics();audit.grid_moments=measure_mass(s.grid,mass);
++        validate_composition(audit,s,plan);
++        const auto cdf=build_host_cdf(s.grid,mass,s.out_nt,s.out_np,s.cdf_policy);report=cdf.report;
++        cdf.write_arrays(directory.staging());const char* backend="cpu_reference_compensated_histogram_host_mass_CDF";
++#endif
++        write_phase_metadata(directory.staging()/"metadata.json",s,plan,audit,report,backend);
++        directory.commit();
++        std::cout.precision(17);
++        std::cout<<"saved="<<o.out<<" g="<<report.g_stored<<" Csca_mm2="<<audit.expected_area.value
++                 <<" unresolved_fraction="<<audit.unresolved_area.value/audit.expected_area.value
++                 <<" histogram_relative_error="<<audit.histogram_relative_error<<" cdf_l1="<<report.l1_error<<'\n';
++        return 0;
++    }
++    catch(const std::exception& e)
++    {
++        write_failure(directory.staging()/"failure.json",e.what(),audit);
++        std::cerr<<"Generation failed; retained "<<directory.staging()<<": "<<e.what()<<'\n';return 2;
++    }
++}
++int run_main(int argc,char** argv)
++{
++    try
++    {
++        if(argc==2&&std::string_view(argv[1])=="--help")
++        {
++            std::cout<<"ice_generate_phase[_cpu] --out DIR --orientations CSV\n"
++                " --radius-mm R --length-mm L --ki X Y Z --ior N --wavelength-nm NM\n"
++                " --theta NT --phi NP [--cdf-theta CT --cdf-phi CP]\n"
++                " [--batch-size N --max-output-records N --max-internal-hits N --tail-tolerance E]\n"
++                " [--max-unresolved-fraction E --max-balance-error E --max-histogram-relative-error E]\n"
++                " [--cdf-max-l1 E --cdf-max-lost-mass E --max-coarsening-tv E]\n"
++                " CUDA binary only: [--modules DIR --device N]\n"
++                "No implicit material dispersion, smoothing, symmetry folding, or CPU fallback.\n";return 0;
++        }
++        return run(parse(argc,argv));
++    }
++    catch(const std::exception& e){std::cerr<<"ice_generate_phase: "<<e.what()<<'\n';return 1;}
++}
++}
++#if defined(_WIN32)
++int wmain(int argc,wchar_t** argv)
++{
++    try
++    {
++        std::vector<std::string> strings;strings.reserve(static_cast<std::size_t>(argc));
++        for(int i=0;i<argc;++i){const auto u=std::filesystem::path(argv[i]).u8string();strings.emplace_back(reinterpret_cast<const char*>(u.data()),u.size());}
++        std::vector<char*> args;for(auto& s:strings)args.push_back(s.data());return run_main(argc,args.data());
++    }
++    catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
++}
++#else
++int main(int argc,char** argv){return run_main(argc,argv);}
++#endif
+diff --git a/hex_phase/configs/two_orientations.csv b/hex_phase/configs/two_orientations.csv
+new file mode 100644
+index 0000000000000000000000000000000000000000..e93d8e124693e458a24024d31a42546862aa0813
+--- /dev/null
++++ b/hex_phase/configs/two_orientations.csv
+@@ -0,0 +1,5 @@
++# Equal NUMBER fractions, deliberately different projected areas and ray counts.
++# Identity and active +90 degree rotation about +z; body +y becomes -x.
++qw,qx,qy,qz,weight,samples,seed
++1,0,0,0,0.5,1024,12345
++0.7071067811865475244,0,0,0.7071067811865475244,0.5,2048,54321
+diff --git a/hex_phase/device/phase_accumulate.cu b/hex_phase/device/phase_accumulate.cu
+new file mode 100644
+index 0000000000000000000000000000000000000000..ef6a2947804e1e7a015c4c6e60b0b66534fbdfca
+--- /dev/null
++++ b/hex_phase/device/phase_accumulate.cu
+@@ -0,0 +1,53 @@
++#include <ice_crystal/phase_math.hpp>
++
++namespace
++{
++using namespace iceCrystal;
++__device__ void increment(std::uint64_t* p)
++{atomicAdd(reinterpret_cast<unsigned long long*>(p),1ull);}
++}
++extern "C" __global__ void ice_phase_accumulate_abi_m2_v1() {}
++extern "C" __global__ void ice_phase_accumulate(iceCrystal::PhaseAccumulateParams p)
++{
++    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
++        k<p.count;k+=std::uint64_t(blockDim.x)*gridDim.x)
++    {
++        const auto& s=p.outgoing[k];const double w=p.area_weight_per_ray*s.power_fraction;
++        const auto b=phase_bin(p.grid,p.rotation.apply(s.direction));
++        if(!b.valid||!(s.power_fraction>0)||!finite_value(s.power_fraction)||!(w>0)||!finite_value(w))
++        {increment(&p.statistics->invalid_samples);continue;}
++        double* target=b.pole>0?&p.statistics->forward_mass:
++            (b.pole<0?&p.statistics->backward_mass:p.cell_mass+b.index);
++        const double old=atomicAdd(target,w);
++        if(old+w==old)
++        {increment(&p.statistics->absorbed_addends);atomicAdd(&p.statistics->absorbed_addend_mass,w);}
++        atomicAdd(&p.statistics->point_mass,w);atomicAdd(&p.statistics->point_axial,w*b.mu);
++        increment(&p.statistics->samples);
++        if(b.boundary_snapped)increment(&p.statistics->boundary_snapped_samples);
++    }
++}
++extern "C" __global__ void ice_phase_finish(iceCrystal::PhaseFinishParams p)
++{
++    __shared__ double shared_mass[256],shared_axial[256];
++    Sum mass{},axial{};const auto n=std::uint64_t(p.grid.nt)*p.grid.np;
++    const double forward=p.statistics->forward_mass/p.grid.np,backward=p.statistics->backward_mass/p.grid.np;
++    for(std::uint64_t k=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;k<n;k+=std::uint64_t(blockDim.x)*gridDim.x)
++    {
++        const auto i=k/p.grid.np;double w=p.cell_mass[k];
++        if(i==0)w+=forward;
++        if(i+1==p.grid.nt)w+=backward;
++        const double d=w/((4*pi/p.grid.np)*(p.grid.u_edges[i+1]-p.grid.u_edges[i]));
++        // Preserve a failure as NaN for the existing PhaseCdf validity audit.
++        p.density[k]=(!(d>=0)||!finite_value(d)||(w>0&&!(d>0))||
++            (p.statistics->forward_mass>0&&!(forward>0))||
++            (p.statistics->backward_mass>0&&!(backward>0)))?::nan(""):d;
++        mass.add(w);axial.add(w*(1-p.grid.u_edges[i]-p.grid.u_edges[i+1]));
++    }
++    shared_mass[threadIdx.x]=mass.value;shared_axial[threadIdx.x]=axial.value;__syncthreads();
++    for(unsigned step=128;step;step/=2)
++    {
++        if(threadIdx.x<step){shared_mass[threadIdx.x]+=shared_mass[threadIdx.x+step];shared_axial[threadIdx.x]+=shared_axial[threadIdx.x+step];}
++        __syncthreads();
++    }
++    if(threadIdx.x==0)p.partials[blockIdx.x]={shared_mass[0],shared_axial[0]};
++}
+diff --git a/hex_phase/include/ice_crystal/orientation_plan.hpp b/hex_phase/include/ice_crystal/orientation_plan.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..4ba19341e34aa2f32371f239aedcbf6938a97e38
+--- /dev/null
++++ b/hex_phase/include/ice_crystal/orientation_plan.hpp
+@@ -0,0 +1,28 @@
++#pragma once
++#include <ice_crystal/phase_math.hpp>
++#include <array>
++#include <filesystem>
++#include <string>
++#include <string_view>
++#include <vector>
++
++namespace iceCrystal
++{
++struct OrientationNode
++{
++    Rotation rotation;
++    std::array<double,4> quaternion{};
++    double weight=0; // number probability mass, NOT PDF per radian or encounter probability
++    std::uint64_t samples=0,seed=0;
++};
++struct OrientationPlan
++{
++    std::vector<OrientationNode> nodes;
++    std::uint64_t total_samples=0;
++    double input_weight_sum=0;
++    std::string source_sha256;
++};
++std::string sha256(std::string_view bytes);
++OrientationPlan parse_orientation_plan(std::string_view csv);
++OrientationPlan read_orientation_plan(const std::filesystem::path&);
++} // namespace iceCrystal
+diff --git a/hex_phase/include/ice_crystal/phase_cuda.hpp b/hex_phase/include/ice_crystal/phase_cuda.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b2265ae76e9fa63e4e1b4c9007459e838a55e6bb
+--- /dev/null
++++ b/hex_phase/include/ice_crystal/phase_cuda.hpp
+@@ -0,0 +1,36 @@
++#pragma once
++#include <ice_crystal/phase_table.hpp>
++#include <ice_crystal/hex_trace_cuda.hpp>
++
++namespace iceCrystal
++{
++// GPU scatter-add is binary64, but its order is not deterministic. Validation
++// compares integrated mass against independently accumulated ray audits.
++class PhaseMassAccumulatorCuda final
++{
++public:
++    PhaseMassAccumulatorCuda(const rainbow::CudaContext&,PhaseGrid);
++    ~PhaseMassAccumulatorCuda() noexcept;
++    PhaseMassAccumulatorCuda(const PhaseMassAccumulatorCuda&)=delete;
++    PhaseMassAccumulatorCuda& operator=(const PhaseMassAccumulatorCuda&)=delete;
++    void load_module(const std::filesystem::path&);
++    void add(const rainbow::DeviceBuffer<OutgoingSample>&,const Rotation&,double area_weight_per_ray);
++    void finish();
++    [[nodiscard]] HistogramStats statistics() const;
++    [[nodiscard]] HistogramMoments moments() const;
++    [[nodiscard]] const rainbow::DeviceBuffer<double>& density() const;
++    [[nodiscard]] std::vector<double> download_density() const; // tests / diagnostics only
++private:
++    void sync();
++    void launch(const char*,void**,unsigned,unsigned=256);
++    PhaseGrid grid_;
++    const rainbow::CudaContext& context_;
++    rainbow::CudaModule module_;
++    rainbow::DeviceBuffer<double> edges_,mass_,density_;
++    rainbow::DeviceBuffer<HistogramStats> statistics_;
++    rainbow::DeviceBuffer<HistogramMoments> partials_;
++    HistogramStats host_statistics_{};
++    HistogramMoments host_moments_{};
++    bool pending_=false,ready_=false,finished_=false;
++};
++} // namespace iceCrystal
+diff --git a/hex_phase/include/ice_crystal/phase_generate.hpp b/hex_phase/include/ice_crystal/phase_generate.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..3a36d1123703cb46ac91045e593c401b4265f678
+--- /dev/null
++++ b/hex_phase/include/ice_crystal/phase_generate.hpp
+@@ -0,0 +1,38 @@
++#pragma once
++#include <ice_crystal/orientation_plan.hpp>
++#include <ice_crystal/phase_table.hpp>
++#include <ice_crystal/hex_trace.hpp>
++#include <functional>
++
++namespace iceCrystal
++{
++struct PhaseGenerationSettings
++{
++    HexPrism prism{};
++    PhaseGrid grid{};
++    double wavelength_nm=0,interior_index=0,exterior_index=1;
++    std::uint32_t max_internal_hits=1024,out_nt=0,out_np=0;
++    double tail_tolerance=1e-12,max_unresolved_fraction=1e-10;
++    double max_balance_error=1e-10,max_histogram_relative_error=1e-10;
++    std::size_t batch_size=4096,max_output_records=4*1024*1024;
++    CdfPolicy cdf_policy{};
++};
++struct CompositionAudit
++{
++    TraceSummary trace{};
++    std::uint64_t orientations_done=0;
++    Sum expected_area,escaped_area,unresolved_area;
++    HistogramStats histogram{};
++    HistogramMoments grid_moments{};
++    double histogram_relative_error=0;
++};
++void validate_generation_settings(const PhaseGenerationSettings&);
++TraceSettings node_trace_settings(const PhaseGenerationSettings&,const OrientationNode&);
++double node_area(const PhaseGenerationSettings&,const OrientationNode&);
++TraceSummary summarize_phase_rays(std::span<const RayAudit>,double balance_tolerance=1e-10);
++void record_batch_audit(CompositionAudit&,const TraceSummary&,double scale);
++void validate_composition(CompositionAudit&,const PhaseGenerationSettings&,const OrientationPlan&);
++void write_phase_metadata(const std::filesystem::path&,const PhaseGenerationSettings&,
++    const OrientationPlan&,const CompositionAudit&,const CdfReport&,const char* backend);
++void write_failure(const std::filesystem::path&,std::string_view,const CompositionAudit&);
++} // namespace iceCrystal
+diff --git a/hex_phase/include/ice_crystal/phase_math.hpp b/hex_phase/include/ice_crystal/phase_math.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a6ebd40991fc942cf8c3453d66c95a29b1e971d9
+--- /dev/null
++++ b/hex_phase/include/ice_crystal/phase_math.hpp
+@@ -0,0 +1,109 @@
++#pragma once
++#include <ice_crystal/hex_trace_core.hpp>
++
++namespace iceCrystal
++{
++struct Rotation
++{
++    Vec3 x{1,0,0},y{0,1,0},z{0,0,1}; // columns: body -> ensemble reference frame
++    ICE_HD Vec3 apply(Vec3 p) const noexcept {return x*p.x+y*p.y+z*p.z;}
++    ICE_HD Vec3 inverse(Vec3 p) const noexcept {return {x.dot(p),y.dot(p),z.dot(p)};}
++    ICE_HD bool valid() const noexcept
++    {
++        return is_unit(x)&&is_unit(y)&&is_unit(z)&&
++            ::fabs(x.dot(y))<=128*DBL_EPSILON&&
++            (x.cross(y)-z).max_abs()<=256*DBL_EPSILON;
++    }
++};
++// Scalar order w,x,y,z; active Hamilton quaternion. Reject nonunit input rather
++// than interpreting arbitrary four-vectors as orientations.
++Rotation rotation_from_quaternion(double w,double x,double y,double z);
++
++struct PhaseGridView
++{
++    const double* u_edges=nullptr;
++    Vec3 ki{};
++    Frame frame{};
++    std::uint32_t nt=0,np=0;
++};
++inline constexpr double pole_roundoff_tolerance=256*DBL_EPSILON;
++struct PhaseBin
++{
++    std::uint64_t index=0;
++    double mu=0;
++    int pole=0; // +1 forward, -1 backward, 0 ordinary
++    bool valid=false,boundary_snapped=false;
++};
++ICE_HD inline PhaseBin phase_bin(PhaseGridView g,Vec3 direction) noexcept
++{
++    PhaseBin b{};
++    if(!g.u_edges||!g.nt||!g.np||!is_unit(direction))return b;
++    const double x=g.frame.e0.dot(direction),y=g.frame.e1.dot(direction),z=g.ki.dot(direction);
++    const double n=::sqrt(x*x+y*y+z*z);
++    if(!(n>0)||!finite_value(n)||::fabs(n-1)>512*DBL_EPSILON)return b;
++    const double mu=z/n,s=::hypot(x,y)/n;
++    b.mu=mu;
++    if(s<=pole_roundoff_tolerance)
++    {
++        b.pole=mu>=0?1:-1;b.valid=true;return b;
++    }
++    // Stable at the two poles. The SAVED binary64 u edges define membership.
++    double u=mu>=0?(0.5*s*s)/(1+mu):1-(0.5*s*s)/(1-mu);
++    if(!(u>=0&&u<=1))return b;
++    std::uint32_t lo=0,hi=g.nt;
++    while(lo+1<hi)
++    {
++        const auto mid=lo+(hi-lo)/2;
++        if(u>=g.u_edges[mid])lo=mid;else hi=mid;
++    }
++    // Canonical half-open boundary assignment within roundoff only. The cap
++    // prevents this from becoming a finite-width filter on extremely fine grids.
++    for(unsigned candidate=0;candidate<2;++candidate)
++    {
++        const auto e=lo+candidate;
++        if(e==0||e>=g.nt)continue;
++        const double width=::fmin(g.u_edges[e]-g.u_edges[e-1],g.u_edges[e+1]-g.u_edges[e]);
++        const double tolerance=::fmin(64*DBL_EPSILON*::fmax(::fabs(u),::fabs(g.u_edges[e])),1e-7*width);
++        if(::fabs(u-g.u_edges[e])<=tolerance)
++        {b.boundary_snapped=(u!=g.u_edges[e]);lo=e;break;}
++    }
++    double phi=::atan2(y,x);
++    if(phi>=pi)phi-=2*pi;
++    const double v=(phi+pi)/(2*pi);
++    double index=v*g.np;
++    const double nearest=::floor(index+0.5);
++    if(::fabs(index-nearest)<=::fmin(64*DBL_EPSILON*g.np,1e-7))
++    {b.boundary_snapped=b.boundary_snapped||(index!=nearest);index=nearest;}
++    auto j=static_cast<std::uint32_t>(index);
++    if(j==g.np)j=0; // periodic seam, including the last rounding ulp
++    if(j>=g.np)return b;
++    b.index=std::uint64_t(lo)*g.np+j;b.valid=true;return b;
++}
++struct HistogramStats
++{
++    double point_mass=0,point_axial=0,forward_mass=0,backward_mass=0;
++    double absorbed_addend_mass=0; // diagnostic, NOT an error bound
++    std::uint64_t samples=0,invalid_samples=0,absorbed_addends=0,boundary_snapped_samples=0;
++};
++struct HistogramMoments {double mass=0,axial=0;};
++struct PhaseAccumulateParams
++{
++    PhaseGridView grid{};
++    Rotation rotation{};
++    const OutgoingSample* outgoing=nullptr;
++    double* cell_mass=nullptr;
++    HistogramStats* statistics=nullptr;
++    std::uint64_t count=0;
++    double area_weight_per_ray=0;
++};
++struct PhaseFinishParams
++{
++    PhaseGridView grid{};
++    const double* cell_mass=nullptr;
++    const HistogramStats* statistics=nullptr;
++    double* density=nullptr;
++    HistogramMoments* partials=nullptr;
++};
++static_assert(std::is_trivially_copyable_v<PhaseAccumulateParams>);
++static_assert(std::is_trivially_copyable_v<PhaseFinishParams>);
++} // namespace iceCrystal
+diff --git a/hex_phase/include/ice_crystal/phase_table.hpp b/hex_phase/include/ice_crystal/phase_table.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..d0e13f551bf0398bf225225da105e7779b5d7011
+--- /dev/null
++++ b/hex_phase/include/ice_crystal/phase_table.hpp
+@@ -0,0 +1,61 @@
++#pragma once
++#include <ice_crystal/phase_math.hpp>
++#include <filesystem>
++#include <span>
++#include <vector>
++
++namespace iceCrystal
++{
++struct PhaseGrid
++{
++    std::uint32_t nt=0,np=0;
++    Vec3 ki{};
++    Frame frame{};
++    std::vector<double> edges;
++    [[nodiscard]] PhaseGridView view() const noexcept {return {edges.data(),ki,frame,nt,np};}
++};
++PhaseGrid make_phase_grid(std::uint32_t nt,std::uint32_t np,Vec3 ki);
++void validate_phase_grid(const PhaseGrid&);
++
++// Nonnegative integrated cross-section contributions, never PDF samples.
++class PhaseMassAccumulator final
++{
++public:
++    explicit PhaseMassAccumulator(PhaseGrid);
++    void add(Vec3 outgoing_reference,double weight_mm2);
++    void add(std::span<const OutgoingSample>,const Rotation&,double area_weight_per_ray);
++    [[nodiscard]] std::vector<double> masses() const;
++    [[nodiscard]] HistogramStats statistics() const;
++    [[nodiscard]] const PhaseGrid& grid() const noexcept {return grid_;}
++private:
++    PhaseGrid grid_;
++    std::vector<Sum> mass_;
++    Sum point_mass_,point_axial_,forward_,backward_;
++    std::uint64_t count_=0,snapped_=0;
++};
++HistogramMoments measure_mass(const PhaseGrid&,std::span<const double>);
++std::vector<double> mass_to_density(const PhaseGrid&,std::span<const double>);
++
++struct CdfPolicy
++{
++    double max_l1_error=1e-10,max_lost_mass=1e-12,max_coarsening_tv=1;
++};
++struct CdfReport
++{
++    double g_source=0,g_stored=0,coarsening_tv=0,cdf_mass=0;
++    double l1_error=0,lost_mass=0,maximum_cell_error=0,aggregation_relative_error=0;
++    std::uint64_t lost_cells=0;
++};
++struct HostCdf
++{
++    PhaseGrid grid;
++    std::vector<double> phi,theta;
++    CdfReport report;
++    void write_arrays(const std::filesystem::path&) const;
++};
++// CPU reference: conservative mass aggregation + ordered binary64 scans.
++// CUDA production path instead calls the EXISTING rainbow::PhaseCdf.
++HostCdf build_host_cdf(const PhaseGrid&,std::span<const double> masses,
++    std::uint32_t out_nt,std::uint32_t out_np,const CdfPolicy& policy={});
++void validate_cdf_policy(const CdfPolicy&);
++} // namespace iceCrystal
+diff --git a/hex_phase/src/orientation_plan.cpp b/hex_phase/src/orientation_plan.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a9a9098220158567d22e742810fe546acda1f12
+--- /dev/null
++++ b/hex_phase/src/orientation_plan.cpp
+@@ -0,0 +1,121 @@
++#include <ice_crystal/orientation_plan.hpp>
++#include <bit>
++#include <charconv>
++#include <fstream>
++#include <limits>
++#include <stdexcept>
++
++namespace iceCrystal
++{
++std::string sha256(std::string_view data)
++{
++    constexpr std::uint32_t constants[64]={
++        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
++        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
++        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
++        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
++        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
++        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
++        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
++        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
++    std::uint32_t h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
++    if(data.size()>(std::numeric_limits<std::uint64_t>::max)()/8-128)throw std::length_error("SHA256 input too long.");
++    const auto blocks=(data.size()+9+63)/64;const auto bits=std::uint64_t(data.size())*8;
++    for(std::size_t block=0;block<blocks;++block)
++    {
++        std::uint32_t w[64]{};
++        for(unsigned j=0;j<64;++j)
++        {
++            const auto pos=block*64+j;unsigned byte=0;
++            if(pos<data.size())byte=static_cast<unsigned char>(data[pos]);
++            else if(pos==data.size())byte=128;
++            else if(pos>=blocks*64-8)byte=static_cast<unsigned>((bits>>(8*(blocks*64-1-pos)))&255);
++            w[j/4]|=std::uint32_t(byte)<<(24-8*(j%4));
++        }
++        for(unsigned t=16;t<64;++t)
++        {
++            const auto a=w[t-15],b=w[t-2];
++            w[t]=w[t-16]+(std::rotr(a,7)^std::rotr(a,18)^(a>>3))+w[t-7]+(std::rotr(b,17)^std::rotr(b,19)^(b>>10));
++        }
++        auto a=h[0],b=h[1],c=h[2],d=h[3],e=h[4],f=h[5],g=h[6],j=h[7];
++        for(unsigned t=0;t<64;++t)
++        {
++            const auto s1=std::rotr(e,6)^std::rotr(e,11)^std::rotr(e,25);
++            const auto t1=j+s1+((e&f)^(~e&g))+constants[t]+w[t];
++            const auto t2=(std::rotr(a,2)^std::rotr(a,13)^std::rotr(a,22))+((a&b)^(a&c)^(b&c));
++            j=g;g=f;f=e;e=d+t1;d=c;c=b;b=a;a=t1+t2;
++        }
++        h[0]+=a;h[1]+=b;h[2]+=c;h[3]+=d;h[4]+=e;h[5]+=f;h[6]+=g;h[7]+=j;
++    }
++    std::string out;out.reserve(64);constexpr char hex[]="0123456789abcdef";
++    for(auto v:h)for(int k=7;k>=0;--k)out+=hex[(v>>(4*k))&15];
++    return out;
++}
++namespace
++{
++std::string_view trim(std::string_view s)
++{
++    const auto first=s.find_first_not_of(" \t\r");
++    if(first==s.npos)return {};
++    return s.substr(first,s.find_last_not_of(" \t\r")-first+1);
++}
++template<class T>T number(std::string_view s)
++{
++    s=trim(s);T x{};const auto r=std::from_chars(s.data(),s.data()+s.size(),x);
++    if(s.empty()||r.ec!=std::errc{}||r.ptr!=s.data()+s.size())throw std::invalid_argument("Malformed orientation number.");
++    return x;
++}
++}
++OrientationPlan parse_orientation_plan(std::string_view csv)
++{
++    OrientationPlan plan;plan.source_sha256=sha256(csv);Sum weights{};bool header=false;
++    std::size_t start=0,line_number=0;
++    while(start<csv.size())
++    {
++        const auto end=csv.find('\n',start);const auto length=(end==csv.npos?csv.size():end)-start;
++        const auto line=trim(csv.substr(start,length));start=end==csv.npos?csv.size():end+1;++line_number;
++        if(line.empty()||line.front()=='#')continue;
++        try
++        {
++            if(!header)
++            {
++                if(line!="qw,qx,qy,qz,weight,samples,seed")throw std::invalid_argument("Expected CSV header qw,qx,qy,qz,weight,samples,seed.");
++                header=true;continue;
++            }
++            std::array<std::string_view,7> cols;std::size_t pos=0;
++            for(unsigned c=0;c<7;++c)
++            {
++                const auto comma=line.find(',',pos);
++                if((c<6&&comma==line.npos)||(c==6&&comma!=line.npos))throw std::invalid_argument("Expected seven CSV fields.");
++                cols[c]=line.substr(pos,(comma==line.npos?line.size():comma)-pos);pos=comma+1;
++            }
++            OrientationNode n;
++            for(unsigned c=0;c<4;++c)n.quaternion[c]=number<double>(cols[c]);
++            n.rotation=rotation_from_quaternion(n.quaternion[0],n.quaternion[1],n.quaternion[2],n.quaternion[3]);
++            n.weight=number<double>(cols[4]);n.samples=number<std::uint64_t>(cols[5]);n.seed=number<std::uint64_t>(cols[6]);
++            if(!finite_value(n.weight)||!(n.weight>0)||!n.samples)throw std::invalid_argument("Weights and sample counts must be positive.");
++            if(n.samples>(std::numeric_limits<std::uint64_t>::max)()-plan.total_samples)throw std::overflow_error("Planned sample count overflows.");
++            plan.total_samples+=n.samples;weights.add(n.weight);plan.nodes.push_back(n);
++        }
++        catch(const std::exception& e){throw std::invalid_argument("Orientation CSV line "+std::to_string(line_number)+": "+e.what());}
++    }
++    if(!header||plan.nodes.empty()||!finite_value(weights.value)||::fabs(weights.value-1)>2e-12)
++        throw std::invalid_argument("Orientation number-probability weights must sum to one (within 2e-12).");
++    plan.input_weight_sum=weights.value;
++    // Only remove roundoff in an already-normalized discrete probability measure.
++    // Raw angular densities / arbitrary importance weights are NOT silently accepted.
++    for(auto& n:plan.nodes)n.weight/=weights.value;
++    return plan;
++}
++OrientationPlan read_orientation_plan(const std::filesystem::path& p)
++{
++    constexpr std::uintmax_t maximum_bytes=256ull*1024*1024;
++    const auto bytes=std::filesystem::file_size(p);
++    if(bytes>maximum_bytes)throw std::length_error("Orientation plan exceeds explicit 256 MiB input limit.");
++    std::ifstream in(p,std::ios::binary);if(!in)throw std::runtime_error("Cannot read orientation plan.");
++    std::string data(static_cast<std::size_t>(bytes),'\0');in.read(data.data(),static_cast<std::streamsize>(bytes));
++    if(in.gcount()!=static_cast<std::streamsize>(bytes)||in.bad()||in.peek()!=std::char_traits<char>::eof())
++        throw std::runtime_error("Short/changed orientation file.");
++    return parse_orientation_plan(data);
++}
++} // namespace iceCrystal
+diff --git a/hex_phase/src/phase_cuda.cpp b/hex_phase/src/phase_cuda.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b2faa26639d6df3cbe315a830c7e3bf489f9f7d
+--- /dev/null
++++ b/hex_phase/src/phase_cuda.cpp
+@@ -0,0 +1,74 @@
++#include <ice_crystal/phase_cuda.hpp>
++#include <rainbow/cuda_error.hpp>
++#include <algorithm>
++#include <stdexcept>
++
++namespace iceCrystal
++{
++PhaseMassAccumulatorCuda::PhaseMassAccumulatorCuda(const rainbow::CudaContext& c,PhaseGrid g)
++    :grid_(std::move(g)),context_(c),module_(c),edges_(c),mass_(c),density_(c),statistics_(c),partials_(c)
++{
++    validate_phase_grid(grid_);const auto n=std::size_t(grid_.nt)*grid_.np;
++    edges_.allocate(grid_.edges.size());mass_.allocate(n);density_.allocate(n);statistics_.allocate(1);
++    context_.make_current();RAINBOW_CUDA_CHECK(cuMemcpyHtoD(edges_.address(),grid_.edges.data(),edges_.byte_size()));
++    mass_.zero_byte_async(context_.stream());statistics_.zero_byte_async(context_.stream());pending_=true;sync();
++}
++PhaseMassAccumulatorCuda::~PhaseMassAccumulatorCuda() noexcept
++{
++    if(pending_)
++    {
++        static_cast<void>(rainbow::detail::report_cuda_cleanup_result(cuCtxSetCurrent(context_.handle()),"phase accumulator cleanup context"));
++        static_cast<void>(rainbow::detail::report_cuda_cleanup_result(cuStreamSynchronize(context_.stream()),"phase accumulator cleanup stream"));
++    }
++}
++void PhaseMassAccumulatorCuda::sync()
++{context_.make_current();RAINBOW_CUDA_CHECK(cuStreamSynchronize(context_.stream()));pending_=false;}
++void PhaseMassAccumulatorCuda::launch(const char* name,void** args,unsigned blocks,unsigned threads)
++{
++    context_.make_current();const auto f=module_.find_function(name);pending_=true;
++    RAINBOW_CUDA_CHECK(cuLaunchKernel(f,blocks,1,1,threads,1,1,0,context_.stream(),args,nullptr));
++}
++void PhaseMassAccumulatorCuda::load_module(const std::filesystem::path& path)
++{
++    module_.load_fatbin(path);static_cast<void>(module_.find_function("ice_phase_accumulate_abi_m2_v1"));
++    static_cast<void>(module_.find_function("ice_phase_accumulate"));static_cast<void>(module_.find_function("ice_phase_finish"));ready_=true;
++}
++void PhaseMassAccumulatorCuda::add(const rainbow::DeviceBuffer<OutgoingSample>& samples,const Rotation& r,double scale)
++{
++    if(!ready_||finished_)throw std::logic_error("Phase accumulator not ready / already finished.");
++    if(!r.valid()||!(scale>0)||!finite_value(scale))throw std::invalid_argument("Invalid orientation / area weight.");
++    if(samples.is_empty())return;
++    PhaseAccumulateParams p{};p.grid=grid_.view();p.grid.u_edges=edges_.data();p.rotation=r;
++    p.outgoing=reinterpret_cast<const OutgoingSample*>(samples.address());p.count=samples.element_count();
++    p.cell_mass=mass_.data();p.statistics=statistics_.data();p.area_weight_per_ray=scale;
++    void* args[]{&p};launch("ice_phase_accumulate",args,static_cast<unsigned>(std::min<std::uint64_t>(4096,(p.count+255)/256)));
++    // Synchronous borrowing: the M1 tracer may release its previous output on the next batch.
++    sync();
++}
++void PhaseMassAccumulatorCuda::finish()
++{
++    if(!ready_||finished_)throw std::logic_error("Phase accumulator not ready / already finished.");
++    sync();statistics_.download({&host_statistics_,1});
++    if(host_statistics_.invalid_samples||!finite_value(host_statistics_.point_mass)||!(host_statistics_.point_mass>0)||
++       !finite_value(host_statistics_.point_axial)||!finite_value(host_statistics_.forward_mass)||
++       !finite_value(host_statistics_.backward_mass)||!finite_value(host_statistics_.absorbed_addend_mass))
++        throw std::runtime_error("GPU histogram rejected invalid samples / nonfinite accumulated powers.");
++    const auto n=std::uint64_t(grid_.nt)*grid_.np;const auto blocks=static_cast<unsigned>(std::min<std::uint64_t>(4096,(n+255)/256));
++    partials_.allocate(blocks);PhaseFinishParams p{};p.grid=grid_.view();p.grid.u_edges=edges_.data();
++    p.cell_mass=mass_.data();p.statistics=statistics_.data();p.density=density_.data();p.partials=partials_.data();
++    void* args[]{&p};launch("ice_phase_finish",args,blocks);sync();
++    std::vector<HistogramMoments> values(blocks);partials_.download(values);Sum mass{},axial{};
++    for(const auto& a:values){mass.add(a.mass);axial.add(a.axial);}
++    host_moments_={mass.value,axial.value};
++    if(!(mass.value>0)||!finite_value(mass.value)||!finite_value(axial.value))throw std::runtime_error("GPU histogram integral invalid.");
++    finished_=true;
++}
++HistogramStats PhaseMassAccumulatorCuda::statistics() const
++{if(!finished_)throw std::logic_error("Histogram not finalized.");return host_statistics_;}
++HistogramMoments PhaseMassAccumulatorCuda::moments() const
++{if(!finished_)throw std::logic_error("Histogram not finalized.");return host_moments_;}
++const rainbow::DeviceBuffer<double>& PhaseMassAccumulatorCuda::density() const
++{if(!finished_)throw std::logic_error("Histogram not finalized.");return density_;}
++std::vector<double> PhaseMassAccumulatorCuda::download_density() const
++{const auto& d=density();std::vector<double> v(d.element_count());d.download(v);return v;}
++} // namespace iceCrystal
+diff --git a/hex_phase/src/phase_generate.cpp b/hex_phase/src/phase_generate.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..60ec28bbc94cfe2e640239f16c7fba0a3933520a
+--- /dev/null
++++ b/hex_phase/src/phase_generate.cpp
+@@ -0,0 +1,171 @@
++#include <ice_crystal/phase_generate.hpp>
++#include <algorithm>
++#include <fstream>
++#include <iomanip>
++#include <locale>
++#include <stdexcept>
++
++#ifndef ICE_PHASE_SOURCE_FINGERPRINT
++#define ICE_PHASE_SOURCE_FINGERPRINT "unknown"
++#endif
++namespace iceCrystal
++{
++namespace
++{
++void quote(std::ostream& o,std::string_view s)
++{
++    o<<'"';constexpr char hex[]="0123456789abcdef";
++    for(unsigned char c:s)
++    {
++        if(c=='"'||c=='\\')o<<'\\'<<char(c);
++        else if(c<32)o<<"\\u00"<<hex[c>>4]<<hex[c&15];
++        else o<<char(c);
++    }
++    o<<'"';
++}
++std::ofstream output(const std::filesystem::path& p)
++{
++    std::ofstream out(p,std::ios::binary|std::ios::trunc);
++    if(!out)throw std::runtime_error("Cannot open metadata output.");
++    out.exceptions(std::ios::badbit|std::ios::failbit);out.imbue(std::locale::classic());out<<std::setprecision(17);return out;
++}
++void vector(std::ostream& f,Vec3 v){f<<'['<<v.x<<','<<v.y<<','<<v.z<<']';}
++}
++void validate_generation_settings(const PhaseGenerationSettings& s)
++{
++    validate_phase_grid(s.grid);validate_cdf_policy(s.cdf_policy);
++    static_cast<void>(make_trace_settings(s.prism,s.grid.ki,s.exterior_index,s.interior_index,1,0,s.max_internal_hits,s.tail_tolerance));
++    if(!(s.wavelength_nm>0)||!finite_value(s.wavelength_nm)||!s.batch_size||!s.max_output_records||
++       !s.out_nt||!s.out_np||s.out_nt>s.grid.nt||s.out_np>s.grid.np||s.grid.nt%s.out_nt||s.grid.np%s.out_np)
++        throw std::invalid_argument("Invalid wavelength, capacity, or coarsening dimensions.");
++    for(double tolerance:{s.max_unresolved_fraction,s.max_balance_error,s.max_histogram_relative_error})
++        if(!finite_value(tolerance)||tolerance<0||tolerance>=1)throw std::invalid_argument("Invalid quality tolerance.");
++}
++TraceSettings node_trace_settings(const PhaseGenerationSettings& s,const OrientationNode& n)
++{
++    if(!n.rotation.valid()||!finite_value(n.weight)||!(n.weight>0)||!n.samples)throw std::invalid_argument("Invalid orientation node.");
++    return make_trace_settings(s.prism,n.rotation.inverse(s.grid.ki),s.exterior_index,s.interior_index,
++        n.samples,n.seed,s.max_internal_hits,s.tail_tolerance);
++}
++double node_area(const PhaseGenerationSettings& s,const OrientationNode& n)
++{
++    const auto c=node_trace_settings(s,n);return s.prism.projected_area_mm2(c.incident_direction);
++}
++TraceSummary summarize_phase_rays(std::span<const RayAudit> rays,double tolerance)
++{
++    auto result=summarize(rays,tolerance);
++    for(const auto& r:rays)
++        result.accepted=result.accepted&&finite_value(r.max_interface_balance_error)&&
++            r.max_interface_balance_error>=0&&r.max_interface_balance_error<=tolerance;
++    return result;
++}
++void record_batch_audit(CompositionAudit& a,const TraceSummary& t,double scale)
++{
++    merge_summary(a.trace,t);
++    a.escaped_area.add(scale*t.escaped_power_sum);a.unresolved_area.add(scale*t.unresolved_power_sum);
++    require_accepted(t); // a bad ray is never omitted while retaining a completed record
++}
++void validate_composition(CompositionAudit& a,const PhaseGenerationSettings& s,const OrientationPlan& plan)
++{
++    require_accepted(a.trace);
++    if(a.trace.rays!=plan.total_samples||a.orientations_done!=plan.nodes.size()||
++       a.histogram.samples!=a.trace.outputs||a.histogram.invalid_samples)throw std::runtime_error("Incomplete composition / output-count mismatch.");
++    const double area=a.expected_area.value,escaped=a.escaped_area.value,unresolved=a.unresolved_area.value;
++    if(!(area>0)||!finite_value(area)||!(escaped>0)||!finite_value(escaped)||!finite_value(unresolved)||unresolved<0)
++        throw std::runtime_error("Invalid integrated cross sections.");
++    if(unresolved/area>s.max_unresolved_fraction)throw std::runtime_error("Unresolved light exceeds explicit global budget.");
++    if(std::fabs((escaped+unresolved)/area-1)>s.max_balance_error)throw std::runtime_error("Orientation-weighted energy balance failed.");
++    if(!(a.grid_moments.mass>0)||!finite_value(a.grid_moments.mass)||!finite_value(a.grid_moments.axial)||
++       !(a.histogram.point_mass>0)||!finite_value(a.histogram.point_mass)||!finite_value(a.histogram.point_axial))
++        throw std::runtime_error("Nonfinite histogram moments.");
++    a.histogram_relative_error=std::max(std::fabs(a.grid_moments.mass/escaped-1),std::fabs(a.histogram.point_mass/escaped-1));
++    if(a.histogram_relative_error>s.max_histogram_relative_error)throw std::runtime_error("Histogram mass differs from independent escaped-ray audit.");
++}
++void write_phase_metadata(const std::filesystem::path& path,const PhaseGenerationSettings& s,
++    const OrientationPlan& plan,const CompositionAudit& a,const CdfReport& r,const char* backend)
++{
++    auto f=output(path);const double area=a.expected_area.value;
++    f<<"{\n  \"schema\": \"rainbow.phase_cdf.numpy.v2\",\n  \"complete\": true,\n"
++     <<"  \"generator_version\": \"ice.hex_phase.m2.v1\",\n  \"backend\": ";quote(f,backend);
++    f<<",\n  \"base_revision\": \"a9538941dcb9df2de6a4130fa66f625f0133c949 + hex-trace-m1\",\n"
++     <<"  \"source_fingerprint_at_configure\": \""<<ICE_PHASE_SOURCE_FINGERPRINT<<"\",\n"
++     <<"  \"dtype\": \"<f8\",\n  \"order\": \"C\",\n"
++     <<"  \"theta_count\": "<<s.out_nt<<",\n  \"phi_count\": "<<s.out_np<<",\n"
++     <<"  \"density_measure\": \"solid_angle_sr\",\n  \"cell_model\": \"constant_density_per_spherical_cell\",\n"
++     <<"  \"coordinates\": \"u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)\",\n"
++     <<"  \"cdf_axis_order\": [\"phi_cell\",\"theta_edge\"],\n"
++     <<"  \"normalization\": \"integral_p_domega_equals_one\",\n"
++     <<"  \"direction_convention\": \"physical_propagation\",\n"
++     <<"  \"coordinate_contract_id\": \"ice.phase_cdf.ensemble_coordinates.v1\",\n"
++     <<"  \"sampling_frame_layout\": \"rows_xyz_columns_e0_e1_k\",\n"
++     <<"  \"sampling_frame_map\": \"local_column_to_ensemble_reference_column\",\n"
++     <<"  \"theta_zero\": \"forward\",\n  \"theta_pi\": \"backward\",\n  \"azimuth_periodic\": true,\n"
++     <<"  \"input_polarization\": \"unpolarized\",\n  \"incident_total_intensity\": 1,\n"
++     <<"  \"single_scattering_albedo\": 1,\n  \"stage\": \"incoherent\",\n"
++     <<"  \"wavelength_nm\": "<<s.wavelength_nm<<",\n  \"interior_index\": "<<s.interior_index
++     <<",\n  \"exterior_index\": "<<s.exterior_index<<",\n  \"query_frame_axis\": ";vector(f,s.grid.ki);
++    f<<",\n  \"query_frame_e0\": ";vector(f,s.grid.frame.e0);
++    f<<",\n  \"sampling_frame_columns\": [["<<s.grid.frame.e0.x<<','<<s.grid.frame.e1.x<<','<<s.grid.ki.x<<"],["
++     <<s.grid.frame.e0.y<<','<<s.grid.frame.e1.y<<','<<s.grid.ki.y<<"],["
++     <<s.grid.frame.e0.z<<','<<s.grid.frame.e1.z<<','<<s.grid.ki.z<<"]],\n"
++     <<"  \"geometry\": {\"shape\": \"regular_hexagonal_prism\",\"body_long_axis\": [0,1,0],"
++     <<"\"circumradius_mm\": "<<s.prism.circumradius_mm<<",\"full_length_mm\": "<<s.prism.length_mm
++     <<",\"projected_area_mm2\": "<<area<<",\"projected_area_m2\": "<<area*1e-6
++     <<",\"projected_area_method\": \"number_weighted_mean_of_convex_face_projections\"},\n"
++     <<"  \"cross_sections\": {\"model\": \"geometric_nonabsorbing\",\"scattering_mm2\": "<<area
++     <<",\"extinction_mm2\": "<<area<<",\"absorption_mm2\": 0,\"scattering_m2\": "<<area*1e-6
++     <<",\"extinction_m2\": "<<area*1e-6<<",\"absorption_m2\": 0,\"wave_scattering_cross_section_computed\": false,"
++     <<"\"assignment\": \"Csca=Cext=number_mean_Aproj; Cabs=0 (transport model)\"},\n"
++     <<"  \"material\": {\"model\": \"caller_supplied_real_index_at_wavelength\","
++     <<"\"wavelength_convention\": \"vacuum_nm\",\"absorption_model\": \"ignored_k_equals_zero\","
++     <<"\"birefringence\": false,\"automatic_ice_dispersion\": false},\n"
++     <<"  \"diffraction_policy\": {\"computed\": false,\"selected_output_includes_diffraction\": false},\n"
++     <<"  \"inter_path_interference\": false,\n  \"tir_relative_phase_retained\": true,\n"
++     <<"  \"orientation\": {\"representation\": \"weighted_discrete_SO3_number_measure\","
++     <<"\"rotation\": \"active_Hamilton_quaternion_wxyz_body_to_ensemble\",\"rows\": "<<plan.nodes.size()
++     <<",\"csv_sha256\": \""<<plan.source_sha256<<"\",\"input_weight_sum\": "<<plan.input_weight_sum
++     <<",\"roundoff_weight_normalization\": "<<1/plan.input_weight_sum
++     <<",\"plan_embedded\": false,\"retain_input_csv_for_reproduction\": true,\"symmetry_reduction\": false},\n"
++     <<"  \"sampling\": {\"generator\": \"counter_splitmix64_open52_v1\",\"planned_rays\": "<<plan.total_samples
++     <<",\"processed_rays\": "<<a.trace.rays<<",\"outgoing_samples\": "<<a.trace.outputs
++     <<",\"batch_size\": "<<s.batch_size<<",\"max_output_records_per_batch\": "<<s.max_output_records
++     <<",\"weight\": \"orientation_number_mass * Aproj / node_samples * path_power\"},\n"
++     <<"  \"transport_audit\": {\"escaped_mm2\": "<<a.escaped_area.value<<",\"unresolved_mm2\": "<<a.unresolved_area.value
++     <<",\"unresolved_fraction\": "<<a.unresolved_area.value/area<<",\"maximum_balance_error\": "<<a.trace.maximum_balance_error
++     <<",\"maximum_interface_balance_error\": "<<a.trace.maximum_interface_balance_error
++     <<",\"max_internal_hits\": "<<s.max_internal_hits<<",\"tail_tolerance_per_ray\": "<<s.tail_tolerance
++     <<",\"max_unresolved_fraction\": "<<s.max_unresolved_fraction<<",\"max_balance_error\": "<<s.max_balance_error
++     <<",\"cdf_normalized_to_resolved_escaped_mass\": true,\"status_counts\": {";
++    for(unsigned i=0;i<8;++i){if(i)f<<',';quote(f,status_name(static_cast<TraceStatus>(i)));f<<':'<<a.trace.status_counts[i];}
++    f<<"}},\n  \"histogram\": {\"theta_count\": "<<s.grid.nt<<",\"phi_count\": "<<s.grid.np
++     <<",\"mass_mm2\": "<<a.grid_moments.mass<<",\"relative_mass_audit_error\": "<<a.histogram_relative_error
++     <<",\"maximum_accepted_relative_mass_error\": "<<s.max_histogram_relative_error
++     <<",\"g_rays\": "<<a.histogram.point_axial/a.histogram.point_mass
++     <<",\"forward_axis_mass_mm2\": "<<a.histogram.forward_mass<<",\"backward_axis_mass_mm2\": "<<a.histogram.backward_mass
++     <<",\"pole_policy\": \"axis_mass_uniform_in_azimuth_in_histogram_end_cap\",\"pole_roundoff_tolerance\": "<<pole_roundoff_tolerance
++     <<",\"atomic_absorbed_addends\": "<<a.histogram.absorbed_addends<<",\"atomic_absorbed_addend_mass_mm2\": "<<a.histogram.absorbed_addend_mass
++     <<",\"boundary_snapped_samples\": "<<a.histogram.boundary_snapped_samples
++     <<",\"boundary_snap_rule\": \"64eps_coordinate_scaled_capped_at_1e-7_cell\""
++     <<",\"atomic_diagnostic_is_error_bound\": false},\n"
++     <<"  \"storage_processing\": {\"gaussian_sigma_degrees\": 0,\"mass_conservative_aggregation\": true,"
++     <<"\"coarsening_tv\": "<<r.coarsening_tv<<",\"maximum_accepted_coarsening_tv\": "<<s.cdf_policy.max_coarsening_tv
++     <<",\"aggregation_integral_relative_change\": "<<r.aggregation_relative_error
++     <<",\"g_source\": "<<r.g_source<<",\"g_stored\": "<<r.g_stored<<"},\n"
++     <<"  \"hg\": {\"g\": "<<r.g_stored<<",\"method\": \"first_moment_of_saved_cell_pdf\",\"target\": \"saved_cdf\","
++     <<"\"cosine_convention\": \"dot(incident_propagation,outgoing_propagation)\"},\n"
++     <<"  \"quality\": {\"source_coverage_certified\": false,\"angular_convergence_certified\": false,"
++     <<"\"orientation_convergence_certified\": false,\"continuous_wave_solution_certified\": false,"
++     <<"\"cdf_l1_mass_error\": "<<r.l1_error<<",\"cdf_maximum_cell_mass_error\": "<<r.maximum_cell_error
++     <<",\"cdf_lost_positive_cells\": "<<r.lost_cells<<",\"cdf_lost_probability_mass\": "<<r.lost_mass
++     <<",\"maximum_accepted_l1_mass_error\": "<<s.cdf_policy.max_l1_error
++     <<",\"maximum_accepted_lost_probability_mass\": "<<s.cdf_policy.max_lost_mass<<",\"cdf_mass\": "<<r.cdf_mass<<"}\n}\n";
++    f.close();
++}
++void write_failure(const std::filesystem::path& path,std::string_view reason,const CompositionAudit& a)
++{
++    auto f=output(path);f<<"{\n  \"complete\": false,\n  \"error\": ";quote(f,reason);
++    f<<",\n  \"processed_rays\": "<<a.trace.rays<<",\n  \"orientations_done\": "<<a.orientations_done<<",\n  \"status_counts\": {";
++    for(unsigned i=0;i<8;++i){if(i)f<<',';quote(f,status_name(static_cast<TraceStatus>(i)));f<<':'<<a.trace.status_counts[i];}
++    f<<"}\n}\n";f.close();
++}
++} // namespace iceCrystal
+diff --git a/hex_phase/src/phase_table.cpp b/hex_phase/src/phase_table.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..0836360d401e2a71de234c5849b7f1842dc48bed
+--- /dev/null
++++ b/hex_phase/src/phase_table.cpp
+@@ -0,0 +1,196 @@
++#include <ice_crystal/phase_table.hpp>
++#include <rainbow/phase_cdf_math.hpp>
++#include <rainbow/npy_writer.hpp>
++#include <algorithm>
++#include <array>
++#include <limits>
++#include <stdexcept>
++
++namespace iceCrystal
++{
++Rotation rotation_from_quaternion(double w,double x,double y,double z)
++{
++    const double n=w*w+x*x+y*y+z*z;
++    if(!finite_value(n)||::fabs(n-1)>2e-12)throw std::invalid_argument("Quaternion must be unit length (w,x,y,z).");
++    const double k=1/std::sqrt(n);w*=k;x*=k;y*=k;z*=k;
++    Rotation r{{1-2*(y*y+z*z),2*(x*y+w*z),2*(x*z-w*y)},
++               {2*(x*y-w*z),1-2*(x*x+z*z),2*(y*z+w*x)},
++               {2*(x*z+w*y),2*(y*z-w*x),1-2*(x*x+y*y)}};
++    if(!r.valid())throw std::invalid_argument("Quaternion rotation failed orthonormality check.");
++    return r;
++}
++PhaseGrid make_phase_grid(std::uint32_t nt,std::uint32_t np,Vec3 ki)
++{
++    if(!nt||!np||std::uint64_t(nt)*np>0xffffffffull||nt>32u*65535u||np>0x7fffffffu)
++        throw std::invalid_argument("Unsupported phase grid dimensions.");
++    PhaseGrid g;g.nt=nt;g.np=np;
++    if(!normalize(ki,g.ki)||!make_frame(g.ki,g.frame))throw std::invalid_argument("Invalid incident direction.");
++    g.edges=rainbow::make_phase_u_edges(nt);validate_phase_grid(g);return g;
++}
++void validate_phase_grid(const PhaseGrid& g)
++{
++    if(!g.nt||!g.np||g.edges.size()!=std::size_t(g.nt)+1||!g.frame.valid(g.ki)||
++       g.edges.front()!=0||g.edges.back()!=1||std::uint64_t(g.nt)*g.np>0xffffffffull)
++        throw std::invalid_argument("Malformed phase grid.");
++    for(std::uint32_t i=0;i<g.nt;++i)
++        if(!finite_value(g.edges[i+1])||!(g.edges[i+1]>g.edges[i]))
++            throw std::invalid_argument("Nonincreasing u edges.");
++}
++PhaseMassAccumulator::PhaseMassAccumulator(PhaseGrid g):grid_(std::move(g))
++{validate_phase_grid(grid_);mass_.resize(std::size_t(grid_.nt)*grid_.np);}
++void PhaseMassAccumulator::add(Vec3 direction,double w)
++{
++    if(!(w>0)||!finite_value(w))throw std::runtime_error("Histogram requires positive finite weight; no lost sample is repaired.");
++    const auto b=phase_bin(grid_.view(),direction);
++    if(!b.valid)throw std::runtime_error("Invalid outgoing direction during accumulation.");
++    if(count_==(std::numeric_limits<std::uint64_t>::max)())throw std::overflow_error("Output counter overflow.");
++    ++count_;snapped_+=b.boundary_snapped;point_mass_.add(w);point_axial_.add(w*b.mu);
++    if(b.pole>0)forward_.add(w);
++    else if(b.pole<0)backward_.add(w);
++    else mass_[b.index].add(w);
++}
++void PhaseMassAccumulator::add(std::span<const OutgoingSample> samples,const Rotation& r,double scale)
++{
++    if(!r.valid()||!(scale>0)||!finite_value(scale))throw std::invalid_argument("Invalid orientation / area weight.");
++    for(const auto& s:samples)
++    {
++        const double w=scale*s.power_fraction;
++        if(!(s.power_fraction>0)||!finite_value(s.power_fraction)||!(w>0)||!finite_value(w))
++            throw std::runtime_error("Output area weight over/underflow.");
++        add(r.apply(s.direction),w);
++    }
++}
++std::vector<double> PhaseMassAccumulator::masses() const
++{
++    std::vector<double> result(mass_.size());
++    const double f=forward_.value/grid_.np,b=backward_.value/grid_.np;
++    if((forward_.value>0&&!(f>0))||(backward_.value>0&&!(b>0)))throw std::runtime_error("Pole weight underflow.");
++    for(std::size_t k=0;k<result.size();++k)
++    {
++        Sum s=mass_[k];const auto i=k/grid_.np;
++        if(i==0)s.add(f);
++        if(i+1==grid_.nt)s.add(b);
++        result[k]=s.value;
++    }
++    return result;
++}
++HistogramStats PhaseMassAccumulator::statistics() const
++{return {point_mass_.value,point_axial_.value,forward_.value,backward_.value,0,count_,0,0,snapped_};}
++HistogramMoments measure_mass(const PhaseGrid& g,std::span<const double> mass)
++{
++    validate_phase_grid(g);
++    if(mass.size()!=std::uint64_t(g.nt)*g.np)throw std::invalid_argument("Mass array dimensions differ.");
++    Sum total{},axial{};
++    for(std::size_t k=0;k<mass.size();++k)
++    {
++        const double w=mass[k];
++        if(!finite_value(w)||w<0)throw std::invalid_argument("Negative/nonfinite mass.");
++        const auto i=k/g.np;total.add(w);axial.add(w*(1-g.edges[i]-g.edges[i+1]));
++    }
++    if(!(total.value>0)||!finite_value(total.value)||!finite_value(axial.value))
++        throw std::runtime_error("Empty/nonfinite histogram.");
++    return {total.value,axial.value};
++}
++std::vector<double> mass_to_density(const PhaseGrid& g,std::span<const double> mass)
++{
++    static_cast<void>(measure_mass(g,mass));std::vector<double> d(mass.size());
++    for(std::size_t k=0;k<mass.size();++k)
++    {
++        const auto i=k/g.np;d[k]=mass[k]/((4*pi/g.np)*(g.edges[i+1]-g.edges[i]));
++        if(!finite_value(d[k])||(mass[k]>0&&!(d[k]>0)))throw std::runtime_error("Mass to density over/underflow.");
++    }
++    return d;
++}
++void validate_cdf_policy(const CdfPolicy& p)
++{
++    if(!finite_value(p.max_l1_error)||p.max_l1_error<0||p.max_l1_error>2||
++       !finite_value(p.max_lost_mass)||p.max_lost_mass<0||p.max_lost_mass>1||
++       !finite_value(p.max_coarsening_tv)||p.max_coarsening_tv<0||p.max_coarsening_tv>1)
++        throw std::invalid_argument("Invalid CDF quality policy.");
++}
++HostCdf build_host_cdf(const PhaseGrid& g,std::span<const double> mass,
++    std::uint32_t nt,std::uint32_t np,const CdfPolicy& policy)
++{
++    validate_cdf_policy(policy);
++    const auto fine=measure_mass(g,mass);
++    if(!nt||!np||nt>g.nt||np>g.np||g.nt%nt||g.np%np)
++        throw std::invalid_argument("Storage dimensions must divide histogram dimensions.");
++    HostCdf out;out.grid=make_phase_grid(nt,np,g.ki);out.grid.frame=g.frame;
++    std::vector<Sum> sums(std::size_t(nt)*np);
++    const auto dt=g.nt/nt,dp=g.np/np;
++    for(std::uint32_t i=0;i<=nt;++i)out.grid.edges[i]=g.edges[std::size_t(i)*dt];
++    for(std::uint32_t i=0;i<g.nt;++i)for(std::uint32_t j=0;j<g.np;++j)
++        sums[std::size_t(i/dt)*np+j/dp].add(mass[std::size_t(i)*g.np+j]);
++    std::vector<double> coarse(sums.size());
++    for(std::size_t k=0;k<coarse.size();++k)coarse[k]=sums[k].value;
++    const auto stored=measure_mass(out.grid,coarse);
++    auto& report=out.report;report.g_source=fine.axial/fine.mass;
++    report.aggregation_relative_error=std::fabs(stored.mass/fine.mass-1);
++    Sum tv{};
++    for(std::uint32_t i=0;i<g.nt;++i)for(std::uint32_t j=0;j<g.np;++j)
++    {
++        const auto ci=i/dt,cj=j/dp;
++        const double fraction=(g.edges[i+1]-g.edges[i])/
++            (out.grid.edges[ci+1]-out.grid.edges[ci])/dp;
++        tv.add(std::fabs(mass[std::size_t(i)*g.np+j]/fine.mass-
++            coarse[std::size_t(ci)*np+cj]/stored.mass*fraction));
++    }
++    report.coarsening_tv=0.5*tv.value;
++    if(!finite_value(report.coarsening_tv)||report.coarsening_tv>policy.max_coarsening_tv||
++       report.aggregation_relative_error>1e-12)throw std::runtime_error("Conservative coarsening audit failed.");
++    // Ordered, nonnegative FP64 scans retain plateaus. Do not repair a CDF.
++    const double largest=*std::max_element(coarse.begin(),coarse.end());
++    out.phi.assign(std::size_t(np)+1,0);out.theta.assign(std::size_t(np)*(nt+1ull),0);
++    std::vector<double> columns(np);
++    for(std::uint32_t j=0;j<np;++j)
++    {
++        const auto base=std::size_t(j)*(nt+1ull);double s=0;
++        for(std::uint32_t i=0;i<nt;++i)
++        {
++            const double w=coarse[std::size_t(i)*np+j]/largest;
++            if(coarse[std::size_t(i)*np+j]>0&&!(w>0))throw std::runtime_error("CDF weight underflow.");
++            s+=w;out.theta[base+i+1]=s;
++        }
++        columns[j]=s;out.phi[j+1]=out.phi[j]+s;
++    }
++    const double total=out.phi.back();
++    if(!(total>0)||!finite_value(total))throw std::runtime_error("Invalid CDF total.");
++    for(std::uint32_t j=0;j<np;++j)
++    {
++        const auto base=std::size_t(j)*(nt+1ull);
++        for(std::uint32_t i=1;i<nt;++i)
++            out.theta[base+i]=columns[j]>0?out.theta[base+i]/columns[j]:out.grid.edges[i];
++        out.theta[base+nt]=1;
++    }
++    for(std::uint32_t j=1;j<np;++j)out.phi[j]/=total;
++    out.phi.back()=1;
++    Sum l1{},lost{},recovered{},axial{};
++    for(std::uint32_t j=0;j<np;++j)for(std::uint32_t i=0;i<nt;++i)
++    {
++        const auto base=std::size_t(j)*(nt+1ull)+i;
++        const double q=(out.phi[j+1]-out.phi[j])*(out.theta[base+1]-out.theta[base]);
++        const double p=coarse[std::size_t(i)*np+j]/stored.mass;
++        if(!finite_value(q)||q<0||out.phi[j+1]<out.phi[j]||out.theta[base+1]<out.theta[base])
++            throw std::runtime_error("Malformed CDF; refusing repair.");
++        if(coarse[std::size_t(i)*np+j]>0&&!(p>0))throw std::runtime_error("Normalized CDF weight underflow.");
++        const double error=std::fabs(p-q);l1.add(error);
++        report.maximum_cell_error=std::max(report.maximum_cell_error,error);
++        if(p>0&&q==0){lost.add(p);++report.lost_cells;}
++        recovered.add(q);axial.add(q*(1-out.grid.edges[i]-out.grid.edges[i+1]));
++    }
++    report.l1_error=l1.value;report.lost_mass=lost.value;report.cdf_mass=recovered.value;
++    report.g_stored=axial.value/recovered.value;
++    if(report.l1_error>policy.max_l1_error||report.lost_mass>policy.max_lost_mass||
++       std::fabs(report.cdf_mass-1)>1e-10||!finite_value(report.g_stored)||
++       !(report.g_stored>-1&&report.g_stored<1))throw std::runtime_error("CDF mass / HG audit failed.");
++    return out;
++}
++void HostCdf::write_arrays(const std::filesystem::path& p) const
++{
++    const std::array<std::uint64_t,1> ashape{std::uint64_t(grid.np)+1},ushape{std::uint64_t(grid.nt)+1};
++    const std::array<std::uint64_t,2> tshape{grid.np,std::uint64_t(grid.nt)+1};
++    rainbow::NpyFloat64Writer a(p/"phi_cdf.npy",ashape);a.append(phi);a.finish();
++    rainbow::NpyFloat64Writer t(p/"theta_given_phi_cdf.npy",tshape);t.append(theta);t.finish();
++    rainbow::NpyFloat64Writer u(p/"u_edges.npy",ushape);u.append(grid.edges);u.finish();
++}
++} // namespace iceCrystal
+diff --git a/hex_phase/tests/orientation_tool_test.py b/hex_phase/tests/orientation_tool_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d227d0d8b838c475f4c8203ecca894301599d5b
+--- /dev/null
++++ b/hex_phase/tests/orientation_tool_test.py
+@@ -0,0 +1,50 @@
++from __future__ import annotations
++import csv
++import io
++import math
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++
++script = Path(sys.argv[1]).resolve()
++
++def load(p):
++    return list(csv.DictReader(io.StringIO("\n".join(s for s in p.read_text().splitlines() if not s.startswith("#")))))
++
++def invoke(args, code=0):
++    p = subprocess.run([sys.executable, str(script), *map(str, args)], capture_output=True, text=True)
++    assert p.returncode == code, p.stderr
++
++with tempfile.TemporaryDirectory() as td:
++    td = Path(td)
++    for mode in ("fixed", "isotropic", "axis-cone", "axis-band"):
++        count = 1 if mode == "fixed" else 20000
++        args = ["--mode", mode, "--count", count, "--samples-per-orientation", "17", "--seed", "23"]
++        if mode in ("axis-cone", "axis-band"):
++            args += ["--half-angle-deg", "3"]
++        a, b = td/(mode+".csv"), td/(mode+"_copy.csv")
++        invoke([*args, "--out", a]); invoke([*args, "--out", b]); assert a.read_bytes() == b.read_bytes()
++        rows = load(a)
++        assert len(rows) == count
++        assert abs(math.fsum(float(r["weight"]) for r in rows)-1) < 1e-14
++        mus, xx = [], []
++        for r in rows:
++            w, x, y, z = (float(r[k]) for k in ("qw", "qx", "qy", "qz"))
++            assert abs(w*w+x*x+y*y+z*z-1) < 1e-14
++            mus.append(1-2*(x*x+z*z))  # world y component of rotated body +y
++            xx.append(1-2*(y*y+z*z))
++            assert int(r["samples"]) == 17 and 0 <= int(r["seed"]) < 2**64
++        if mode == "isotropic":
++            assert abs(math.fsum(mus)/count) < .02
++            assert abs(math.fsum(x*x for x in mus)/count-1/3) < .02
++            assert abs(math.fsum(xx)/count) < .02  # spin is not fixed
++        elif mode == "axis-cone":
++            lo = math.cos(math.radians(3))
++            assert min(mus) >= lo-1e-14 and max(mus) <= 1+1e-14
++            assert abs(math.fsum(mus)/count-(1+lo)/2) < (1-lo)*.02
++        elif mode == "axis-band":
++            hi = math.sin(math.radians(3))
++            assert max(map(abs, mus)) <= hi+1e-14
++            assert abs(math.fsum(mus)/count) < hi*.02
++    print("PASS orientation plan generator: four modes, reproducibility, unit quaternions, solid-angle and spin moments")
+diff --git a/hex_phase/tests/phase_cli_test.py b/hex_phase/tests/phase_cli_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf128d6ce0536fbd561ddb0bb261a98da5e34366
+--- /dev/null
++++ b/hex_phase/tests/phase_cli_test.py
+@@ -0,0 +1,114 @@
++from __future__ import annotations
++import hashlib
++import json
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import numpy as np
++
++exe = Path(sys.argv[1]).resolve()
++repo = Path(sys.argv[2]).resolve()
++sys.path.insert(0, str(repo / "python"))
++from rainbow_dataset.record import PhaseRecord
++
++
++def run(args: list[str], code: int = 0) -> subprocess.CompletedProcess:
++    p = subprocess.run([str(exe), *map(str, args)], text=True, encoding="utf-8", errors="replace", capture_output=True)
++    if p.returncode != code:
++        raise AssertionError(f"expected {code}, got {p.returncode}\n{p.stdout}\n{p.stderr}")
++    return p
++
++
++def arrays(record: Path):
++    with PhaseRecord(record, validate=True) as r:
++        a = np.array(r.phi_cdf)
++        t = np.array(r.theta_cdf)
++        u = np.array(r.u_edges)
++        p = np.diff(a)[:, None] * np.diff(t, axis=1)
++        return a, t, u, p, r.metadata
++
++
++with tempfile.TemporaryDirectory(prefix="ice_phase_検証_") as td:
++    base = Path(td)
++    plan = base / "orientations.csv"
++    plan.write_bytes((repo / "hex_phase/configs/two_orientations.csv").read_bytes())
++    common = ["--orientations", plan, "--radius-mm", "0.1", "--length-mm", "0.2", "--ki", "1", "-0.4", "0.3",
++              "--ior", "1.31", "--wavelength-nm", "550", "--theta", "72", "--phi", "144", "--cdf-theta", "36", "--cdf-phi", "72"]
++    run(["--help"])
++    out = base / "reference"
++    result = run([*common, "--out", out, "--batch-size", "512"])
++    print(result.stdout.strip())
++    expected = {"metadata.json", "phi_cdf.npy", "theta_given_phi_cdf.npy", "u_edges.npy"}
++    assert {p.name for p in out.iterdir()} == expected
++    a, t, u, mass, m = arrays(out)
++    assert a.shape == (73,) and t.shape == (72, 37) and u.shape == (37,)
++    assert all(x.dtype.str == "<f8" and x.flags.c_contiguous for x in (a, t, u))
++    assert m["orientation"]["csv_sha256"] == hashlib.sha256(plan.read_bytes()).hexdigest()
++    assert m["histogram"]["relative_mass_audit_error"] < 1e-10
++    assert m["sampling"]["planned_rays"] == 3072
++    assert abs(mass.sum()-1) < 1e-12
++    expected_g = np.sum(mass * (1-u[:-1]-u[1:])[None, :])
++    assert abs(expected_g-m["hg"]["g"]) < 1e-12
++    area, escaped, unresolved = (m["geometry"]["projected_area_mm2"], m["transport_audit"]["escaped_mm2"],
++                               m["transport_audit"]["unresolved_mm2"])
++    assert abs((escaped+unresolved)/area-1) < 1e-12
++    assert m["material"]["automatic_ice_dispersion"] is False
++    assert m["diffraction_policy"]["computed"] is False
++    assert m["storage_processing"]["gaussian_sigma_degrees"] == 0
++    assert m["quality"]["angular_convergence_certified"] is False
++    # Chunking must not alter the sample IDs or orientation probabilities.
++    other = base / "other_batch"
++    run([*common, "--out", other, "--batch-size", "31"])
++    _, _, _, other_mass, _ = arrays(other)
++    error = np.abs(other_mass-mass).sum()
++    assert error < 1e-10, error
++    # Plateau-safe inversion, uniform in u rather than theta; independent check of sampling convention.
++    rng = np.random.default_rng(1907)
++    count = 100000
++    up, ut = rng.random(count), rng.random(count)
++    j = np.searchsorted(a, up, side="right")-1
++    us = np.empty(count)
++    for col in np.unique(j):
++        selected = j == col
++        i = np.searchsorted(t[col], ut[selected], side="right")-1
++        du_cdf = t[col, i+1]-t[col, i]
++        assert np.all(du_cdf > 0)
++        fraction = (ut[selected]-t[col, i])/du_cdf
++        us[selected] = u[i] + fraction*(u[i+1]-u[i])
++    g_sample = np.mean(1-2*us)
++    assert abs(g_sample-expected_g) < 6/np.sqrt(count)
++    # A successfully published record is not overwritten.
++    digest = {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in out.iterdir()}
++    run([*common, "--out", out], code=1)
++    assert digest == {f.name: hashlib.sha256(f.read_bytes()).hexdigest() for f in out.iterdir()}
++    for name, options in [
++        ("limited", ["--max-internal-hits", "1"]),
++        ("large_tail", ["--tail-tolerance", "0.001"]),
++        ("coarsening", ["--max-coarsening-tv", "0"]),
++        ("capacity", ["--max-output-records", "1"]),
++    ]:
++        failed = base / name
++        run([*common, "--out", failed, *options], code=2)
++        assert not failed.exists()
++        part = base / (name+".part")
++        assert json.loads((part / "failure.json").read_text())["complete"] is False
++        assert not (part / "metadata.json").exists()
++        try:
++            PhaseRecord(part)
++        except ValueError:
++            pass
++        else:
++            raise AssertionError("accepted incomplete .part")
++    # Matched indices: all geometric light remains in the forward direction;
++    # finite-cell CDF distributes the pole mass uniformly over azimuth.
++    transparent = base / "transparent"
++    matched = common.copy()
++    matched[matched.index("--ior")+1] = "1"
++    run([*matched, "--out", transparent, "--tail-tolerance", "0"])
++    pa, pt, pu, pm, mm = arrays(transparent)
++    assert np.abs(pm[:, 0]-1/72).max() < 1e-13
++    assert np.abs(pm[:, 1:]).max() == 0
++    assert abs(mm["hg"]["g"]-(1-pu[1])) < 1e-12
++    # Upstream reader bytes are not edited by this test.
++    print(f"PASS CLI + unchanged PhaseRecord + NumPy: chunk_L1={error:.4g}, sampled_g={g_sample:.9g}, exact_g={expected_g:.9g}")
+diff --git a/hex_phase/tests/phase_cuda_tests.cpp b/hex_phase/tests/phase_cuda_tests.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..c742484524c9f173c6fe70b292f4a2ae15493da9
+--- /dev/null
++++ b/hex_phase/tests/phase_cuda_tests.cpp
+@@ -0,0 +1,119 @@
++#include <ice_crystal/phase_cuda.hpp>
++#include <ice_crystal/phase_generate.hpp>
++#include <rainbow/phase_cdf.hpp>
++#include <rainbow/cuda_error.hpp>
++#include <algorithm>
++#include <iostream>
++#include <iomanip>
++#include <stdexcept>
++#include <string>
++
++using namespace iceCrystal;
++namespace
++{
++void check(bool b,const char* m){if(!b)throw std::runtime_error(m);}
++void near(double x,double y,double e,const char* m)
++{check(finite_value(x)&&finite_value(y)&&std::fabs(x-y)<=e,m);}
++void compare_cdf(rainbow::CudaContext& context,const std::filesystem::path& modules,
++    const PhaseGrid& grid,const std::vector<double>& mass,PhaseMassAccumulatorCuda& h,
++    unsigned out_nt,unsigned out_np)
++{
++    const auto cpu=build_host_cdf(grid,mass,out_nt,out_np);
++    rainbow::PhaseCdf gpu(context);gpu.load_module(modules/"phase_cdf.fatbin");
++    rainbow::PhaseDensityView input{};input.count=h.density().element_count();
++    input.scalar=reinterpret_cast<const double*>(h.density().address());input.stage=rainbow::PhaseDensityStage::Scalar;
++    rainbow::PhaseStorageSettings settings{};settings.theta_count=out_nt;settings.phi_count=out_np;
++    settings.gaussian_sigma_degrees=0;
++    gpu.build(input,grid.nt,grid.np,{},settings);
++    check(gpu.u_edges()==cpu.grid.edges,"CPU/CUDA saved u edges differ");
++    std::vector<double> phi(out_np+1),theta(std::size_t(out_np)*(out_nt+1));
++    gpu.phi_cdf().download(phi);gpu.theta_cdf().download(theta);
++    Sum l1;
++    for(unsigned j=0;j<out_np;++j)for(unsigned i=0;i<out_nt;++i)
++    {
++        const auto k=std::size_t(j)*(out_nt+1ull)+i;
++        const double a=(phi[j+1]-phi[j])*(theta[k+1]-theta[k]);
++        const double b=(cpu.phi[j+1]-cpu.phi[j])*(cpu.theta[k+1]-cpu.theta[k]);
++        l1.add(std::fabs(a-b));
++    }
++    check(l1.value<2e-10,"CPU/CUDA cell probability L1 mismatch");
++    near(gpu.storage_statistics().g_stored,cpu.report.g_stored,2e-11,"CPU/CUDA HG mismatch");
++    near(gpu.storage_statistics().coarsening_tv,cpu.report.coarsening_tv,2e-10,"CPU/CUDA coarsening TV mismatch");
++    std::cout<<"  CDF_L1="<<l1.value<<" g="<<gpu.storage_statistics().g_stored<<'\n';
++}
++void synthetic(rainbow::CudaContext& context,const std::filesystem::path& modules)
++{
++    const auto grid=make_phase_grid(74,146,{1,-0.4,0.3});
++    for(bool only_poles:{false,true})
++    {
++        PhaseMassAccumulator cpu(grid);PhaseMassAccumulatorCuda gpu(context,grid);
++        gpu.load_module(modules/"phase_accumulate.fatbin");
++        std::vector<OutgoingSample> samples(8192);
++        for(std::size_t i=0;i<samples.size();++i)
++        {
++            auto& s=samples[i];
++            if(only_poles||i%17==0)s.direction=(i%3)?grid.ki:-grid.ki;
++            else
++            {
++                const double u=sample_uniform(7,i,0),phi=2*pi*sample_uniform(7,i,1)-pi;
++                const double st=2*std::sqrt(u*(1-u));
++                s.direction=grid.ki*(1-2*u)+grid.frame.e0*(st*std::cos(phi))+grid.frame.e1*(st*std::sin(phi));
++            }
++            s.power_fraction=std::pow(10.,-12*sample_uniform(7,i,2));
++        }
++        rainbow::DeviceBuffer<OutgoingSample> device(context);device.allocate(samples.size());context.make_current();
++        RAINBOW_CUDA_CHECK(cuMemcpyHtoD(device.address(),samples.data(),device.byte_size()));
++        cpu.add(samples,{},0.7);gpu.add(device,{},0.7);gpu.finish();
++        const auto mass=cpu.masses();const auto d=gpu.download_density();const auto expected=mass_to_density(grid,mass);
++        Sum error;for(std::size_t k=0;k<d.size();++k)
++        {const auto i=k/grid.np;error.add(std::fabs(d[k]-expected[k])*(4*pi/grid.np)*(grid.edges[i+1]-grid.edges[i]));}
++        check(error.value/cpu.statistics().point_mass<2e-11,"GPU histogram differs from compensated CPU");
++        check(gpu.statistics().samples==samples.size(),"lost GPU samples");
++        compare_cdf(context,modules,grid,mass,gpu,37,73);
++    }
++    // A bad sample cannot become a valid empty/sanitized histogram.
++    PhaseMassAccumulatorCuda broken(context,grid);broken.load_module(modules/"phase_accumulate.fatbin");
++    OutgoingSample invalid{};invalid.direction={0,0,0};invalid.power_fraction=1;
++    rainbow::DeviceBuffer<OutgoingSample> d(context);d.allocate(1);context.make_current();
++    RAINBOW_CUDA_CHECK(cuMemcpyHtoD(d.address(),&invalid,sizeof(invalid)));broken.add(d,{},1);
++    bool rejected=false;try{broken.finish();}catch(const std::exception&){rejected=true;}
++    check(rejected,"GPU silently accepted invalid sample");
++}
++void real(rainbow::CudaContext& context,const std::filesystem::path& modules)
++{
++    const auto plan=parse_orientation_plan("qw,qx,qy,qz,weight,samples,seed\n1,0,0,0,0.25,256,7\n"
++        "0.7071067811865476,0,0,0.7071067811865476,0.75,512,13\n");
++    PhaseGenerationSettings s;s.prism={.1,.2};s.grid=make_phase_grid(74,146,{1,-.4,.3});
++    s.interior_index=1.31;s.wavelength_nm=550;s.out_nt=37;s.out_np=73;
++    PhaseMassAccumulator cpu(s.grid);PhaseMassAccumulatorCuda gpu(context,s.grid);
++    gpu.load_module(modules/"phase_accumulate.fatbin");HexPrismTracer tracer(context);tracer.load_module(modules/"hex_trace.fatbin");
++    CompositionAudit audit;
++    for(const auto& n:plan.nodes)
++    {
++        const auto c=node_trace_settings(s,n);const double area=node_area(s,n),scale=n.weight*area/double(n.samples);
++        audit.expected_area.add(n.weight*area);
++        for(std::uint64_t first=0;first<n.samples;)
++        {
++            const auto count=std::min<std::uint64_t>(73,n.samples-first);
++            const auto cb=trace_batch_cpu(c,first,count);require_accepted(summarize(cb.audits));cpu.add(cb.outgoing,n.rotation,scale);
++            tracer.trace(c,first,count);record_batch_audit(audit,summarize_phase_rays(tracer.download_audits()),scale);
++            gpu.add(tracer.outgoing(),n.rotation,scale);first+=count;
++        }
++        ++audit.orientations_done;
++    }
++    gpu.finish();audit.histogram=gpu.statistics();audit.grid_moments=gpu.moments();validate_composition(audit,s,plan);
++    compare_cdf(context,modules,s.grid,cpu.masses(),gpu,37,73);
++    std::cout<<"  real_histogram_mass_error="<<audit.histogram_relative_error<<'\n';
++}
++}
++int main(int argc,char** argv)
++{
++    try
++    {
++        const auto modules=argc==2?std::filesystem::path(argv[1]):std::filesystem::absolute(argv[0]).parent_path()/"modules";
++        std::cout<<std::setprecision(17);rainbow::CudaContext context(0);
++        synthetic(context,modules);real(context,modules);
++        std::cout<<"PASS CUDA histogram + existing PhaseCdf: synthetic HDR, poles, invalid sample, real weighted orientations\n";return 0;
++    }
++    catch(const std::exception& e){std::cerr<<"CUDA test FAILED (not skipped): "<<e.what()<<'\n';return 1;}
++}
+diff --git a/hex_phase/tests/phase_tests.cpp b/hex_phase/tests/phase_tests.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..67ab1da279ce3887709b6c5fe8ff0847f4ef1d53
+--- /dev/null
++++ b/hex_phase/tests/phase_tests.cpp
+@@ -0,0 +1,208 @@
++#include <ice_crystal/phase_generate.hpp>
++#include <algorithm>
++#include <functional>
++#include <iomanip>
++#include <iostream>
++#include <limits>
++#include <stdexcept>
++#include <string>
++
++using namespace iceCrystal;
++namespace
++{
++void check(bool x,const char* m){if(!x)throw std::runtime_error(m);}
++void near(double x,double y,double eps,const char* m){check(finite_value(x)&&finite_value(y)&&std::fabs(x-y)<=eps,m);}
++template<class F>void rejects(F&& f,const char* m){bool bad=false;try{f();}catch(const std::exception&){bad=true;}check(bad,m);}
++std::vector<double> reconstruct(const HostCdf& c)
++{
++    std::vector<double> p(std::size_t(c.grid.nt)*c.grid.np);
++    for(unsigned i=0;i<c.grid.nt;++i)for(unsigned j=0;j<c.grid.np;++j)
++    {
++        const auto k=std::size_t(j)*(c.grid.nt+1ull)+i;
++        p[std::size_t(i)*c.grid.np+j]=(c.phi[j+1]-c.phi[j])*(c.theta[k+1]-c.theta[k]);
++    }
++    return p;
++}
++double l1(std::span<const double> a,std::span<const double> b)
++{check(a.size()==b.size(),"array dimensions");Sum s;for(std::size_t i=0;i<a.size();++i)s.add(std::fabs(a[i]-b[i]));return s.value;}
++void sha_plan()
++{
++    check(sha256("")=="e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855","SHA256 empty");
++    check(sha256("abc")=="ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","SHA256 abc");
++    check(sha256(std::string(1000000,'a'))=="cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0","SHA256 million a");
++    const std::string header="qw,qx,qy,qz,weight,samples,seed\n";
++    const auto p=parse_orientation_plan("# explicit\r\n"+header+"1,0,0,0,0.25,17,18446744073709551615\r\n1,0,0,0,0.75,55,3\n");
++    check(p.total_samples==72&&p.nodes.size()==2,"orientation counts");near(p.nodes[1].weight,0.75,0,"number weight");
++    rejects([&]{parse_orientation_plan(header+"1,0,0,0,2,1,1\n");},"unnormalized density accepted");
++    rejects([&]{parse_orientation_plan(header+"2,0,0,0,1,1,1\n");},"nonunit quaternion accepted");
++    rejects([&]{parse_orientation_plan(header+"1,0,0,0,nan,1,1\n");},"nan accepted");
++    rejects([&]{parse_orientation_plan(header+"1,0,0,0,1,0,1\n");},"empty samples accepted");
++    rejects([&]{parse_orientation_plan(header+"1,0,0,0,1,1,1,2\n");},"excess field accepted");
++    rejects([&]{parse_orientation_plan(header+"1,0,0,0,0.5,18446744073709551615,1\n1,0,0,0,0.5,1,2\n");},"counter overflow accepted");
++}
++void rotations()
++{
++    const double v=std::sqrt(0.5);const auto r=rotation_from_quaternion(v,0,0,v);
++    check((r.apply({1,0,0})-Vec3{0,1,0}).max_abs()<1e-15,"active rotation sign");
++    check((r.inverse(r.apply({0.1,-3,7}))-Vec3{0.1,-3,7}).max_abs()<4e-15,"inverse");
++    for(unsigned i=0;i<1000;++i)
++    {
++        const double angle=2*pi*sample_uniform(7,i,0);Vec3 a;
++        check(normalize({2*sample_uniform(13,i,0)-1,2*sample_uniform(13,i,1)-1,2*sample_uniform(13,i,2)-1},a),"axis");
++        const double s=std::sin(angle/2);const auto q=rotation_from_quaternion(std::cos(angle/2),s*a.x,s*a.y,s*a.z);
++        near(q.apply({1,2,3}).dot(q.apply({1,2,3})),14,3e-14,"rotation norm");
++    }
++    Rotation bad;bad.z={0,0,-1};check(!bad.valid(),"reflection is not SO3");
++}
++void measure_contract()
++{
++    const auto g=make_phase_grid(64,128,{1,-0.4,0.3});std::vector<double> masses(64*128);
++    for(unsigned i=0;i<64;++i)for(unsigned j=0;j<128;++j)masses[i*128+j]=(4*pi/128)*(g.edges[i+1]-g.edges[i]);
++    const auto c=build_host_cdf(g,masses,64,128);near(c.report.g_stored,0,1e-15,"isotropic moment");
++    for(unsigned j=0;j<=128;++j)near(c.phi[j],double(j)/128,1e-14,"uniform phi marginal");
++    for(unsigned j=0;j<128;++j)for(unsigned i=0;i<=64;++i)near(c.theta[j*65+i],g.edges[i],2e-15,"uniform per-solid-angle conditional");
++    const auto d=mass_to_density(g,masses);for(double v:d)near(v,1,3e-16,"divide mass by area");
++    auto incorrect=masses;
++    for(unsigned i=0;i<64;++i)for(unsigned j=0;j<128;++j)incorrect[i*128+j]*=g.edges[i+1]-g.edges[i];
++    const auto wrong=reconstruct(build_host_cdf(g,incorrect,64,128));const auto right=reconstruct(c);
++    check(l1(wrong,right)>0.2,"double area weighting test not sensitive");
++    std::cout<<"  double_area_weighting_TV="<<0.5*l1(wrong,right)<<'\n';
++}
++void cells_and_poles()
++{
++    const auto g=make_phase_grid(8,16,{1,-0.4,0.3});PhaseMassAccumulator h(g);
++    h.add(g.ki,3);h.add(-g.ki,1);const auto w=h.masses();
++    for(unsigned j=0;j<16;++j){near(w[j],3./16,0,"forward cap");near(w[7*16+j],1./16,0,"backward cap");}
++    const auto c=build_host_cdf(g,w,8,16);near(c.report.g_stored,0.5*(1-g.edges[1]),5e-16,"cell moment not ray moment");
++    for(unsigned j=0;j<=16;++j)near(c.phi[j],double(j)/16,1e-15,"pole azimuth invariance");
++    const auto r=rotation_from_quaternion(0.5,0.5,0.5,0.5);
++    PhaseGrid rotated=g;rotated.ki=r.apply(g.ki);rotated.frame={r.apply(g.frame.e0),r.apply(g.frame.e1)};
++    PhaseMassAccumulator other(rotated);
++    for(unsigned i=0;i<8;++i)for(unsigned j=0;j<16;++j)
++    {
++        const double u=(g.edges[i]+g.edges[i+1])/2,mu=1-2*u,st=2*std::sqrt(u*(1-u)),phi=-pi+(j+.5)*2*pi/16;
++        const auto d=g.ki*mu+g.frame.e0*(st*std::cos(phi))+g.frame.e1*(st*std::sin(phi));
++        const auto b=phase_bin(g.view(),d);check(b.valid&&!b.pole&&b.index==i*16+j,"cell-center bin");
++        h.add(d,0.01);other.add(r.apply(d),0.01);
++    }
++    other.add(rotated.ki,3);other.add(-rotated.ki,1);near(l1(h.masses(),other.masses()),0,2e-15,"frame covariance");
++    const auto seam=phase_bin(g.view(),-g.frame.e0);check(seam.valid&&seam.index%16==0,"periodic seam");
++    const auto axes=make_phase_grid(20,40,{0,0,1});
++    for(double perturbation:{-1e-14,0.,1e-14})
++    {
++        const auto cell=phase_bin(axes.view(),{1,perturbation,0});
++        check(cell.valid&&cell.index==10*40+20,"phi boundary roundoff assignment");
++        const auto polar=phase_bin(axes.view(),{1,0,perturbation});
++        check(polar.valid&&polar.index==10*40+20,"u boundary roundoff assignment");
++    }
++    Vec3 away;check(normalize({1,-1e-7,0.23},away),"boundary test vector");
++    const auto unsnapped=phase_bin(axes.view(),away);
++    check(unsnapped.index%40==19&&!unsnapped.boundary_snapped,"roundoff rule broadened into filter");
++    rejects([&]{h.add({0,0,0},1);},"invalid direction accepted");
++    rejects([&]{h.add(g.ki,0);},"zero weight accepted");
++    rejects([&]{h.add(g.ki,std::numeric_limits<double>::infinity());},"infinite weight accepted");
++}
++void cdf_sparse_and_coarsen()
++{
++    const auto g=make_phase_grid(48,96,{0,-1,0});std::vector<double> mass(48*96);
++    for(unsigned i=0;i<48;++i)for(unsigned j=0;j<96;++j)
++        mass[i*96+j]=(j%7==0)?std::pow(10.,-12.*double((17*i+13*j)%97)/96):0;
++    const auto c=build_host_cdf(g,mass,24,48);const auto p=reconstruct(c);
++    near(c.report.cdf_mass,1,2e-15,"CDF normalized");check(c.report.l1_error<2e-14,"CDF roundoff");
++    Sum total;for(double x:mass)total.add(x);std::vector<double> coarse(24*48);
++    for(unsigned i=0;i<48;++i)for(unsigned j=0;j<96;++j)coarse[(i/2)*48+j/2]+=mass[i*96+j]/total.value;
++    near(l1(coarse,p),0,2e-14,"conservative independent coarsening");
++    const auto original=build_host_cdf(g,mass,48,96);
++    for(unsigned j=0;j<96;++j)if(j%7)for(unsigned i=0;i<=48;++i)
++        near(original.theta[j*49+i],g.edges[i],0,"zero marginal conditional fallback");
++    CdfPolicy tight;tight.max_coarsening_tv=0;
++    rejects([&]{build_host_cdf(g,mass,24,48,tight);},"coarsening quality ignored");
++    rejects([&]{build_host_cdf(g,mass,25,48);},"noninteger coarsening accepted");
++    std::vector<double> zero(mass.size());rejects([&]{build_host_cdf(g,zero,48,96);},"empty histogram accepted");
++    mass[0]=-1;rejects([&]{build_host_cdf(g,mass,48,96);},"negative histogram accepted");
++    const auto small=make_phase_grid(2,2,{1,0,0});std::vector<double> hdr{1,1e-20,1e-20,1e-20};
++    CdfPolicy exact;exact.max_lost_mass=0;
++    rejects([&]{build_host_cdf(small,hdr,2,2,exact);},"lost CDF mass silently repaired");
++    std::cout<<"  sparse_CDF_L1="<<c.report.l1_error<<" coarsening_TV="<<c.report.coarsening_tv<<'\n';
++}
++struct Composed {std::vector<double> mass;CompositionAudit audit;};
++Composed compose(PhaseGenerationSettings s,const OrientationPlan& plan,std::size_t chunk)
++{
++    PhaseMassAccumulator h(s.grid);CompositionAudit a;
++    for(const auto& n:plan.nodes)
++    {
++        const double area=node_area(s,n);a.expected_area.add(n.weight*area);
++        const auto c=node_trace_settings(s,n);const double scale=n.weight*area/n.samples;
++        for(std::uint64_t first=0;first<n.samples;)
++        {
++            const auto count=std::min<std::uint64_t>(chunk,n.samples-first);const auto b=trace_batch_cpu(c,first,count);
++            record_batch_audit(a,summarize_phase_rays(b.audits,s.max_balance_error),scale);h.add(b.outgoing,n.rotation,scale);first+=count;
++        }
++        ++a.orientations_done;
++    }
++    auto mass=h.masses();a.histogram=h.statistics();a.grid_moments=measure_mass(s.grid,mass);validate_composition(a,s,plan);
++    return {mass,a};
++}
++void real_composition()
++{
++    const auto plan=parse_orientation_plan("qw,qx,qy,qz,weight,samples,seed\n1,0,0,0,0.25,73,12345\n"
++        "0.7071067811865476,0,0,0.7071067811865476,0.75,211,54321\n");
++    PhaseGenerationSettings s;s.prism={0.1,0.2};s.grid=make_phase_grid(36,72,{1,-0.4,0.3});
++    s.out_nt=36;s.out_np=72;s.wavelength_nm=550;s.interior_index=1.31;
++    validate_generation_settings(s);
++    const auto a=compose(s,plan,10000),b=compose(s,plan,19);
++    near(l1(a.mass,b.mass),0,1e-17,"batch partition changed histogram");
++    const auto c=build_host_cdf(s.grid,a.mass,36,72);near(c.report.cdf_mass,1,1e-15,"composed CDF");
++    // Each marginal is the SUM of unnormalized kernels, not a mean of already normalized CDFs.
++    auto p0=plan,p1=plan;p0.nodes={plan.nodes[0]};p1.nodes={plan.nodes[1]};
++    p0.nodes[0].weight=p1.nodes[0].weight=1;p0.total_samples=p0.nodes[0].samples;p1.total_samples=p1.nodes[0].samples;
++    const auto one=compose(s,p0,43),two=compose(s,p1,43);std::vector<double> expected(a.mass.size());
++    for(std::size_t i=0;i<expected.size();++i)expected[i]=0.25*one.mass[i]+0.75*two.mass[i];
++    near(l1(expected,a.mass),0,3e-17,"orientation mixing weights");
++    std::cout<<"  real_outputs="<<a.audit.trace.outputs<<" mass_error="<<a.audit.histogram_relative_error
++             <<" unresolved="<<a.audit.unresolved_area.value/a.audit.expected_area.value<<" g="<<c.report.g_stored<<'\n';
++    RayAudit invalid_interface{};invalid_interface.status=TraceStatus::Exhausted;
++    invalid_interface.escaped_power=1;invalid_interface.unresolved_power=0;
++    invalid_interface.max_interface_balance_error=std::numeric_limits<double>::quiet_NaN();
++    check(!summarize_phase_rays({&invalid_interface,1}).accepted,"nonfinite interface diagnostic hidden");
++    s.max_internal_hits=1;rejects([&]{compose(s,plan,100);},"truncation accepted");
++    s.max_internal_hits=1024;s.tail_tolerance=1e-3;s.max_unresolved_fraction=1e-10;
++    rejects([&]{compose(s,plan,100);},"global tail budget ignored");
++}
++void analytical_area_and_n1()
++{
++    const auto plan=parse_orientation_plan("qw,qx,qy,qz,weight,samples,seed\n1,0,0,0,0.5,17,11\n"
++        "0.7071067811865476,0,0,0.7071067811865476,0.5,55,22\n");
++    PhaseGenerationSettings s;s.prism={1,2};s.grid=make_phase_grid(16,32,{0,-1,0});s.out_nt=16;s.out_np=32;
++    s.wavelength_nm=550;s.interior_index=1;s.tail_tolerance=0;
++    const auto a=compose(s,plan,9);near(a.audit.expected_area.value,0.5*((3*sqrt3/2)+4),2e-15,"mean projected area");
++    near(a.audit.escaped_area.value,a.audit.expected_area.value,4e-15,"transparent area");
++    near(a.audit.histogram.forward_mass,a.audit.expected_area.value,4e-15,"forward mass retained");
++    for(unsigned j=0;j<32;++j)near(a.mass[j],a.audit.expected_area.value/32,2e-16,"delta cap independent of basis");
++    const auto c=build_host_cdf(s.grid,a.mass,16,32);near(c.report.g_stored,1-s.grid.edges[1],3e-15,"stored HG uses finite cells");
++    // Independent numerical integration of the projection formula over S^2: E A = S/4.
++    const HexPrism prism{0.2,0.7};Sum area;const unsigned n=100000;
++    const double golden=pi*(3-std::sqrt(5.));
++    for(unsigned i=0;i<n;++i)
++    {
++        const double mu=1-2*(i+0.5)/n,phi=golden*i,st=std::sqrt(1-mu*mu);
++        area.add(prism.projected_area_mm2({st*std::cos(phi),mu,st*std::sin(phi)}));
++    }
++    const double relative=std::fabs(area.value/n/(prism.surface_area_mm2()/4)-1);
++    check(relative<2e-6,"isotropic projected area S/4");std::cout<<"  area_S_over_4_relative="<<relative<<'\n';
++}
++}
++int main()
++{
++    try
++    {
++        std::cout<<std::setprecision(17);
++        const std::pair<const char*,std::function<void()>> tests[]{
++            {"sha256_and_plan",sha_plan},{"rotations",rotations},{"probability_measure_contract",measure_contract},
++            {"cells_poles_covariance",cells_and_poles},{"cdf_sparse_coarsening_rejection",cdf_sparse_and_coarsen},
++            {"real_traces_composition_batch_invariance",real_composition},{"analytic_area_and_transparent_limit",analytical_area_and_n1}};
++        for(const auto& [name,test]:tests){test();std::cout<<"PASS "<<name<<'\n';}
++        return 0;
++    }
++    catch(const std::exception& e){std::cerr<<"FAILED: "<<e.what()<<'\n';return 1;}
++}
+diff --git a/hex_phase/tools/make_orientations.py b/hex_phase/tools/make_orientations.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..556968613a8486c3f9ebb85ac6fa40d31698230b
+--- /dev/null
++++ b/hex_phase/tools/make_orientations.py
+@@ -0,0 +1,85 @@
++#!/usr/bin/env python3
++"""Generate explicit weighted SO(3) nodes. Built-ins are test/model examples,
++not fits to an observed ice-crystal orientation distribution. Keep this CSV:
++the record stores its SHA256, not every orientation. Standard library only.
++"""
++from __future__ import annotations
++import argparse
++import csv
++import math
++from pathlib import Path
++import random
++
++
++def multiply(a: tuple[float, ...], b: tuple[float, ...]) -> tuple[float, ...]:
++    w, x, y, z = a
++    v, i, j, k = b
++    return (w*v-x*i-y*j-z*k, w*i+x*v+y*k-z*j,
++            w*j-x*k+y*v+z*i, w*k+x*j-y*i+z*v)
++
++
++def axis_angle(axis: tuple[float, ...], angle: float) -> tuple[float, ...]:
++    s = math.sin(angle/2)
++    return (math.cos(angle/2), *(s*x for x in axis))
++
++
++def quaternion(theta: float, azimuth: float, spin: float) -> tuple[float, ...]:
++    # Ry(azimuth) Rz(theta) Ry(spin): the body +y axis has dot(+y)=cos(theta).
++    q = multiply(multiply(axis_angle((0., 1., 0.), azimuth),
++                          axis_angle((0., 0., 1.), theta)),
++                 axis_angle((0., 1., 0.), spin))
++    n = math.sqrt(sum(x*x for x in q))
++    return tuple(x/n for x in q)
++
++
++def main() -> None:
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument("--out", type=Path, required=True)
++    p.add_argument("--mode", choices=("fixed", "isotropic", "axis-cone", "axis-band"), required=True)
++    p.add_argument("--count", type=int, required=True)
++    p.add_argument("--samples-per-orientation", type=int, required=True)
++    p.add_argument("--seed", type=int, required=True)
++    p.add_argument("--half-angle-deg", type=float,
++                   help="cone about +y, or band about the horizontal plane; uniform solid angle")
++    a = p.parse_args()
++    if a.count <= 0 or a.samples_per_orientation <= 0 or a.seed < 0:
++        p.error("count/samples must be positive and seed nonnegative")
++    if a.samples_per_orientation >= 2**64 or a.count*a.samples_per_orientation >= 2**64:
++        p.error("planned sample count exceeds uint64")
++    if a.mode == "fixed" and a.count != 1:
++        p.error("fixed requires count=1")
++    if a.mode in ("axis-cone", "axis-band"):
++        if a.half_angle_deg is None or not math.isfinite(a.half_angle_deg) or not 0 <= a.half_angle_deg <= 90:
++            p.error("cone/band requires half-angle-deg in [0,90]")
++    elif a.half_angle_deg is not None:
++        p.error("half-angle-deg applies only to cone/band")
++    pose_rng = random.Random(a.seed)
++    # Separate random stream for entry-point seeds; orientation nodes do not
++    # change when the ray count or ray seed implementation is modified.
++    ray_rng = random.Random(a.seed ^ 0xD1B54A32D192ED03)
++    a.out.parent.mkdir(parents=True, exist_ok=True)
++    with a.out.open("x", encoding="utf-8", newline="") as f:
++        f.write(f"# test/model orientation plan; mode={a.mode}; count={a.count}; seed={a.seed}; half_angle_deg={a.half_angle_deg}\n")
++        f.write("# Uniform spin and azimuth; cone/band are NOT meteorological Gaussian fits.\n")
++        writer = csv.writer(f, lineterminator="\n")
++        writer.writerow(("qw", "qx", "qy", "qz", "weight", "samples", "seed"))
++        for _ in range(a.count):
++            if a.mode == "fixed":
++                q = (1., 0., 0., 0.)
++            else:
++                u, v, w = pose_rng.random(), pose_rng.random(), pose_rng.random()
++                if a.mode == "isotropic":
++                    mu = 2*u-1
++                elif a.mode == "axis-cone":
++                    # 1-cos(alpha), stable even for a very small cone.
++                    d = 2*math.sin(math.radians(a.half_angle_deg)/2)**2
++                    mu = 1-u*d
++                else:
++                    mu = (2*u-1)*math.sin(math.radians(a.half_angle_deg))
++                q = quaternion(math.acos(mu), 2*math.pi*v, 2*math.pi*w)
++            writer.writerow((*[format(x, ".17g") for x in q], format(1/a.count, ".17g"),
++                             a.samples_per_orientation, ray_rng.getrandbits(64)))
++
++
++if __name__ == "__main__":
++    main()

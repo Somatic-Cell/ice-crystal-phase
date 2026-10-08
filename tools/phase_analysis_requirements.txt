@@ -1,0 +1,4 @@
+# Python >= 3.10. Tested: Python 3.13.5, NumPy 2.3.5, Matplotlib 3.10.8.
+# NumPy is required for validation; Matplotlib is optional with --no-plots.
+numpy>=1.23
+matplotlib>=3.6
