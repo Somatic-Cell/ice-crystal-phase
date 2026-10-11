@@ -1,4 +1,5 @@
 #include <ice_crystal/atlas.hpp>
+#include <ice_crystal/ice_optics.hpp>
 #include <rainbow/npy_writer.hpp>
 #if defined(ICE_ATLAS_HAS_CUDA)
 #include <ice_crystal/atlas_cuda.hpp>
@@ -18,7 +19,14 @@
 namespace
 {
 using namespace iceCrystal;
-struct Options {atlas::Settings s;std::filesystem::path out,modules;int device=0;};
+struct Options
+{
+    atlas::Settings s;
+    std::filesystem::path out,modules;
+    int device=0;
+    bool ice_material=true;
+    optics::IceState optical_state;
+};
 double real(std::string_view v)
 {
     double x=0;const auto r=std::from_chars(v.data(),v.data()+v.size(),x);
@@ -49,6 +57,12 @@ Options parse(int argc,char** argv)
         else if(key=="--device") {const auto v=integer(value);if(v>2147483647u)throw std::invalid_argument("Device range.");o.device=int(v);}
         else if(key=="--radius-mm")s.prism.circumradius_mm=real(value);
         else if(key=="--length-mm")s.prism.length_mm=real(value);
+        else if(key=="--material")
+        {
+            if(value=="ice")o.ice_material=true;
+            else if(value=="constant")o.ice_material=false;
+            else throw std::invalid_argument("Material must be ice or constant.");
+        }
         else if(key=="--ior")s.interior_index=real(value);
         else if(key=="--exterior-ior")s.exterior_index=real(value);
         else if(key=="--wavelength-nm")s.wavelength_nm=real(value);
@@ -69,6 +83,18 @@ Options parse(int argc,char** argv)
     if(seen.count("--device")||seen.count("--modules"))throw std::invalid_argument("CPU binary does not accept CUDA settings.");
 #endif
     if(o.out.empty())throw std::invalid_argument("--out required.");
+    if(!seen.count("--wavelength-nm"))throw std::invalid_argument("--wavelength-nm is required (vacuum nm).");
+    if(o.ice_material)
+    {
+        if(seen.count("--ior"))throw std::invalid_argument("Ice index is evaluated from wavelength; --ior requires explicit --material constant.");
+        o.optical_state=optics::evaluate_ice_wb2008(o.s.wavelength_nm);
+        o.s.interior_index=o.optical_state.n;
+    }
+    else
+    {
+        if(!seen.count("--ior"))throw std::invalid_argument("Constant material requires --ior.");
+        o.optical_state={o.s.wavelength_nm,o.s.interior_index,0,0,0,0};
+    }
     atlas::validate(o.s);return o;
 }
 void vec(std::ostream& o,Vec3 v){o<<'['<<v.x<<','<<v.y<<','<<v.z<<']';}
@@ -76,13 +102,18 @@ int run(int argc,char** argv)
 {
     if(argc==2&&std::string_view(argv[1])=="--help")
     {
-        std::cout<<"ice_precompute_atlas[_cpu] --out DIR --radius-mm R --length-mm L --ior N --wavelength-nm NM\n"
+        std::cout<<"ice_precompute_atlas[_cpu] --out DIR --radius-mm R --length-mm L --wavelength-nm NM\n"
+          " --material ice (default, WB2008 n(lambda), 200..1100nm) | --material constant --ior N\n"
           " --incident-theta-intervals T --incident-phi-intervals P --theta NT --phi NP --area-subdivisions S\n"
           " [--max-internal-hits 2048 --tail-tolerance 1e-12 --batch-rays 64 --max-work-mib 512]\n"
           " [--max-unresolved-fraction 1e-10 --max-balance-error 1e-10 --exterior-ior 1]\n"
           "CUDA only: [--modules DIR --device 0]. No random seeds, smoothing, or CPU fallback.\n";return 0;
     }
-    const auto o=parse(argc,argv);const auto& s=o.s;rainbow::DatasetDirectory directory(o.out);
+    const auto o=parse(argc,argv);const auto& s=o.s;
+    std::cout<<std::setprecision(17)<<"material="<<(o.ice_material?"ice_wb2008_real_only":"constant")
+             <<" wavelength_nm="<<s.wavelength_nm<<" n="<<s.interior_index
+             <<" kappa_evaluated_not_used="<<o.optical_state.kappa<<'\n';
+    rainbow::DatasetDirectory directory(o.out);
     try
     {
 #if defined(ICE_ATLAS_HAS_CUDA)
@@ -103,9 +134,9 @@ int run(int argc,char** argv)
           <<"\"theta_count\":"<<s.theta_count<<",\"phi_count\":"<<s.phi_count<<",\n"
           <<"\"geometry\":{\"shape\":\"regular_hexagonal_prism\",\"circumradius_mm\":"<<s.prism.circumradius_mm
           <<",\"full_length_mm\":"<<s.prism.length_mm<<",\"body_long_axis\":[0,1,0]},\n"
-          <<"\"material\":{\"model\":\"caller_supplied_real_index_at_wavelength\",\"interior_index\":"<<s.interior_index
-          <<",\"exterior_index\":"<<s.exterior_index<<",\"wavelength_nm\":"<<s.wavelength_nm
-          <<",\"automatic_ice_dispersion\":false,\"absorption\":false,\"birefringence\":false},\n"
+          <<"\"material\":";
+        optics::write_material_json(meta,o.optical_state,s.exterior_index,o.ice_material);
+        meta<<",\n"
           <<"\"symmetry\":\"D6h_O3_full_24_scalar_unpolarized\",\n"
           <<"\"incident_reconstruction\":\"bilinear_theta_phi_in_spherical_incident_frame\",\n"
           <<"\"incident_formula\":\"k=(sin(t)cos(p),cos(t),sin(t)sin(p));e0=(cos(t)cos(p),-sin(t),cos(t)sin(p));e1=k_cross_e0\",\n"

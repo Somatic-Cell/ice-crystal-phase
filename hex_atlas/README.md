@@ -1,3 +1,8 @@
+> **M4 spectral/NF extension:** 波長から氷の屈折率を自動評価し，最終レコードを
+> 実際の `RainbowReference` と同じ契約で保存する．一括生成・本番前確認は
+> [`SPECTRAL_NF.md`](SPECTRAL_NF.md) を参照．以下の M3 の固定屈折率例は
+> `--material constant` を明示した回帰試験であり，分散を含む通常生成ではない．
+
 # M3: 固定入射応答の事前計算と決定論的な配向合成
 
 ## この差分の範囲
@@ -145,7 +150,7 @@ Standalone の全 CTest には依存する M1 の2件も含まれる。
 Visual Studio の出力配置の例：
 
 ```bat
-.\build\hex_atlas\Release\ice_precompute_atlas.exe --out out\atlas_550 --radius-mm 0.1 --length-mm 0.2 --ior 1.31 --wavelength-nm 550 --incident-theta-intervals 6 --incident-phi-intervals 3 --theta 36 --phi 72 --area-subdivisions 2
+.\build\hex_atlas\Release\ice_precompute_atlas.exe --out out\atlas_550 --radius-mm 0.1 --length-mm 0.2 --material constant --ior 1.31 --wavelength-nm 550 --incident-theta-intervals 6 --incident-phi-intervals 3 --theta 36 --phi 72 --area-subdivisions 2
 ```
 
 CPU standalone の場合、実行ファイルを `build-atlas-host\Release\ice_precompute_atlas_cpu.exe` に置き換える。

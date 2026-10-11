@@ -1,0 +1,1421 @@
+diff --git a/hex_atlas/CMakeLists.txt b/hex_atlas/CMakeLists.txt
+index b73f2aed242d710d3417c968fab5b725072a0714..a4220d3ffe4af97dcd900a75d93affe86b64a6d1 100644
+--- a/hex_atlas/CMakeLists.txt
++++ b/hex_atlas/CMakeLists.txt
+@@ -7,6 +7,7 @@ else()
+     set(_atlas_cuda_default ${ICE_HEX_ENABLE_CUDA})
+ endif()
+ option(ICE_ATLAS_ENABLE_CUDA "Build deterministic CUDA area-ray precomputation" ${_atlas_cuda_default})
++set(ICE_NF_SOURCE_DIR "" CACHE PATH "Optional spherical-hg-flow checkout for actual RainbowReference integration tests")
+ option(ICE_ATLAS_BUILD_TESTS "Build atlas and deterministic composition tests" ${BUILD_TESTING})
+ set(ICE_ATLAS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
+ get_filename_component(ICE_ATLAS_REPO "${ICE_ATLAS_ROOT}/.." ABSOLUTE)
+@@ -30,12 +31,12 @@ function(ice_atlas_configure target)
+         target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-fno-fast-math;-ffp-contract=off>")
+     endif()
+ endfunction()
+-add_library(ice_atlas_core STATIC src/atlas.cpp "${ICE_ATLAS_REPO}/src/npy_writer.cpp")
++add_library(ice_atlas_core STATIC src/atlas.cpp src/ice_optics.cpp "${ICE_ATLAS_REPO}/src/npy_writer.cpp")
+ ice_atlas_configure(ice_atlas_core)
+ target_link_libraries(ice_atlas_core PUBLIC ice_hex_trace_core)
+ file(GLOB_RECURSE _atlas_sources CONFIGURE_DEPENDS "${ICE_ATLAS_ROOT}/include/*.hpp"
+     "${ICE_ATLAS_ROOT}/src/*.cpp" "${ICE_ATLAS_ROOT}/device/*.cu" "${ICE_ATLAS_ROOT}/apps/*.cpp"
+-    "${ICE_ATLAS_REPO}/hex_trace/include/*.hpp")
++    "${ICE_ATLAS_REPO}/hex_trace/include/*.hpp" "${ICE_ATLAS_ROOT}/src/*.inc" "${ICE_ATLAS_ROOT}/data/*.dat")
+ list(APPEND _atlas_sources "${ICE_ATLAS_ROOT}/CMakeLists.txt" "${ICE_ATLAS_REPO}/hex_trace/src/hex_trace.cpp"
+     "${ICE_ATLAS_REPO}/hex_phase/include/ice_crystal/phase_math.hpp" "${ICE_ATLAS_REPO}/src/npy_writer.cpp")
+ list(SORT _atlas_sources)
+@@ -89,10 +90,23 @@ if(ICE_ATLAS_BUILD_TESTS)
+     ice_atlas_configure(ice_atlas_host_tests)
+     target_link_libraries(ice_atlas_host_tests PRIVATE ice_atlas_core)
+     add_test(NAME ice_atlas_host COMMAND ice_atlas_host_tests)
++    add_executable(ice_optics_host_tests tests/ice_optics_tests.cpp)
++    ice_atlas_configure(ice_optics_host_tests)
++    target_link_libraries(ice_optics_host_tests PRIVATE ice_atlas_core)
++    add_test(NAME ice_atlas_ice_optics COMMAND ice_optics_host_tests "${ICE_ATLAS_ROOT}/data/wb2008_199_1100nm.dat")
+     find_package(Python3 COMPONENTS Interpreter QUIET)
+     if(Python3_Interpreter_FOUND)
+         execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import numpy" RESULT_VARIABLE _atlas_numpy OUTPUT_QUIET ERROR_QUIET)
+         if(_atlas_numpy EQUAL 0)
++            add_test(NAME ice_atlas_spectral_cli COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/spectral_cli_test.py"
++                "$<TARGET_FILE:ice_precompute_atlas_cpu>" "${ICE_ATLAS_REPO}")
++            if(ICE_NF_SOURCE_DIR)
++                if(NOT EXISTS "${ICE_NF_SOURCE_DIR}/src/phaseflow/rainbow.py")
++                    message(FATAL_ERROR "ICE_NF_SOURCE_DIR does not contain src/phaseflow/rainbow.py")
++                endif()
++                add_test(NAME ice_atlas_nf_compatibility COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/spectral_cli_test.py"
++                    "$<TARGET_FILE:ice_precompute_atlas_cpu>" "${ICE_ATLAS_REPO}" "${ICE_NF_SOURCE_DIR}")
++            endif()
+             add_test(NAME ice_atlas_python COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/test_compose.py")
+             add_test(NAME ice_atlas_polar_azimuth COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/test_polar_azimuth.py")
+             add_test(NAME ice_atlas_cli COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/cli_test.py"
+@@ -106,6 +120,12 @@ if(ICE_ATLAS_BUILD_TESTS)
+         ice_atlas_stage(ice_atlas_cuda_tests)
+         add_test(NAME ice_atlas_cuda COMMAND ice_atlas_cuda_tests)
+         if(Python3_Interpreter_FOUND AND _atlas_numpy EQUAL 0)
++            add_test(NAME ice_atlas_cuda_spectral_cli COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/spectral_cli_test.py"
++                "$<TARGET_FILE:ice_precompute_atlas>" "${ICE_ATLAS_REPO}")
++            if(ICE_NF_SOURCE_DIR)
++                add_test(NAME ice_atlas_cuda_nf_compatibility COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/spectral_cli_test.py"
++                    "$<TARGET_FILE:ice_precompute_atlas>" "${ICE_ATLAS_REPO}" "${ICE_NF_SOURCE_DIR}")
++            endif()
+             add_test(NAME ice_atlas_cuda_cli COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/cli_test.py"
+                 "$<TARGET_FILE:ice_precompute_atlas>" "${ICE_ATLAS_REPO}")
+         endif()
+diff --git a/hex_atlas/README.md b/hex_atlas/README.md
+index c3df9d09dd50634714cadedfd0ab1ee5e439455c..bc57ad57d9ce7727d9abf7bfc484ff1c336de84d 100644
+--- a/hex_atlas/README.md
++++ b/hex_atlas/README.md
+@@ -1,3 +1,8 @@
++> **M4 spectral/NF extension:** 波長から氷の屈折率を自動評価し，最終レコードを
++> 実際の `RainbowReference` と同じ契約で保存する．一括生成・本番前確認は
++> [`SPECTRAL_NF.md`](SPECTRAL_NF.md) を参照．以下の M3 の固定屈折率例は
++> `--material constant` を明示した回帰試験であり，分散を含む通常生成ではない．
++
+ # M3: 固定入射応答の事前計算と決定論的な配向合成
+ 
+ ## この差分の範囲
+@@ -145,7 +150,7 @@ Standalone の全 CTest には依存する M1 の2件も含まれる。
+ Visual Studio の出力配置の例：
+ 
+ ```bat
+-.\build\hex_atlas\Release\ice_precompute_atlas.exe --out out\atlas_550 --radius-mm 0.1 --length-mm 0.2 --ior 1.31 --wavelength-nm 550 --incident-theta-intervals 6 --incident-phi-intervals 3 --theta 36 --phi 72 --area-subdivisions 2
++.\build\hex_atlas\Release\ice_precompute_atlas.exe --out out\atlas_550 --radius-mm 0.1 --length-mm 0.2 --material constant --ior 1.31 --wavelength-nm 550 --incident-theta-intervals 6 --incident-phi-intervals 3 --theta 36 --phi 72 --area-subdivisions 2
+ ```
+ 
+ CPU standalone の場合、実行ファイルを `build-atlas-host\Release\ice_precompute_atlas_cpu.exe` に置き換える。
+diff --git a/hex_atlas/SPECTRAL_NF.md b/hex_atlas/SPECTRAL_NF.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..ba480d066083b45f16cbb928cc99deeb336eb11f
+--- /dev/null
++++ b/hex_atlas/SPECTRAL_NF.md
+@@ -0,0 +1,150 @@
++# M4: 単一粒子・波長/入射角データセット
++
++基準: `1cf6758d28473678ed141654f8c0c9b4f21197de` (2026-10-11 に確認した main)。
++
++## 今回の範囲
++
++- 氷 Ih の実屈折率を真空波長から自動評価する (Warren–Brandt 2008)。
++- 同じ形状・指定した配向分布で、複数波長と複数入射角の CDF を作る。
++- 最終レコードを `spherical-hg-flow` の**無変更の RainbowReference**で検査する。
++- 完了した単粒子 atlas を同一ビルド・同一条件で再利用する簡単なバッチ実行を追加する。
++
++形状・粒径・乱流から配向幅を予測するモデルは**追加していない**。
++柱/板/Parry を網羅する拡張、回折・吸収・複屈折・経路間干渉も追加しない。
++M3 の固定面積求積、R/TT/TRT/... の全保持次数の追跡、決定論的配向求積、
++投影面積の重み、非負の直接循環和、鉛直入射の解析的方位積分を変更していない。
++これは現在の幾何光学/有限格子モデルを学習へ渡すための実装であり、Maxwell 基準解ではない。
++
++## ビルド
++
++リポジトリのルートから、既に動作した CUDA/OptiX/architecture 設定を維持して実行する。
++`ICE_NF_SOURCE_DIR` は実際の学習プロジェクトのディレクトリに合わせる。
++
++```bat
++cmake -S . -B build -DBUILD_TESTING=ON -DICE_BUILD_HEX_ATLAS=ON -DICE_ATLAS_ENABLE_CUDA=ON -DICE_ATLAS_BUILD_TESTS=ON -DICE_NF_SOURCE_DIR=C:/Users/sy415/workspace/spherical-hg-flow
++cmake --build build --config Release --target ice_precompute_atlas ice_precompute_atlas_cpu ice_optics_host_tests ice_atlas_host_tests ice_atlas_cuda_tests
++ctest --test-dir build -C Release -R "^ice_atlas_" --output-on-failure
++```
++
++CPU のみなら以下。CUDA/OptiX 不要。
++
++```bat
++cmake -S hex_atlas -B build-atlas-host -DICE_ATLAS_ENABLE_CUDA=OFF -DICE_ATLAS_BUILD_TESTS=ON -DICE_NF_SOURCE_DIR=C:/Users/sy415/workspace/spherical-hg-flow
++cmake --build build-atlas-host --config Release
++ctest --test-dir build-atlas-host -C Release --output-on-failure
++```
++
++外部 NF プロジェクトを指定しなければ、その integration test だけ登録しない。
++その場合に他のテストが通っても NF integration の合格とは言わない。
++手動の `check_nf_compatibility.py` は生成後に使用できる。Python/NumPy が必要。
++**この差分の配布側検証は CPU のみ。CUDA・Windows/MSVC の新しい実機試験は未実施。**
++CUDA カーネル、Driver API ラッパー、実行時ライブラリの方式には変更を加えていない。
++
++## 1. 先に12条件だけ生成して log PDF を確認
++
++`configs/spectral_preview.json` は次を明示する (収束済みの認定条件ではない)。
++
++- 外接円半径 R=0.1mm、全長 L=0.2mm。これまでの例と同じ形状。L/(2R)=1。
++  細長い柱や薄板の観測代表形状と主張するものではない。
++- c 軸の水平付近 Gaussian、sigma=3度、個数比0.9、SO(3)一様の個数比0.1。
++  測定フィットではなく固定した基準分布。密度は d beta、追加 sin(beta) なし。
++- 固定配向求積: azimuth=72、tilt=12、spin=24。乱数なし。
++- 相対入射格子: theta/phi とも2度 (45区間と15区間、46x16節点)。
++- 出射格子: 180x360 (1度)、縮約・Gaussian 後処理なし。
++- 面積求積: subdivisions=2。GPU batch-rays=32、max-work-mib=512。
++- 波長: 450/550/650nm。入射傾斜: 0/30/60/90度。
++
++```bat
++python -m pip install -r hex_atlas\python\requirements.txt
++python hex_atlas\tools\run_spectrum.py --exe build\hex_atlas\Release\ice_precompute_atlas.exe --plan hex_atlas\configs\spectral_preview.json --atlas-root out\m4_atlases --out out\m4_preview --dry-run
++python hex_atlas\tools\run_spectrum.py --exe build\hex_atlas\Release\ice_precompute_atlas.exe --plan hex_atlas\configs\spectral_preview.json --atlas-root out\m4_atlases --out out\m4_preview
++```
++
++`--dry-run` は容量目安と実行予定を表示するだけで、ファイルを作らない。
++通常実行は前半の atlas 作成だけを指定バイナリで行い、後半は CPU/NumPy で合成する。
++CUDA に失敗しても CPU へ切り替えない。子プロセスの出力はバイト列のログとして保存する。
++
++**--material ice が通常モード。--ior は指定しない。**
++従来の一定値試験だけ `--material constant --ior 1.31` を使う。
++波長から CPU 上で n(lambda) を一度計算し、その値を CPU/CUDA トレーサ双方に渡す。
++450/550/650nm の n はそれぞれ 1.3157/1.3110/1.3080。
++200..1100nm の範囲をサポートし、範囲外は拒否する。温度補正式は追加していない。
++虚部は参照値を metadata に残すが、solver の虚部は0。外部媒質は通常1。
++詳細な出典・補間規則は `data/README.md`。
++
++```bat
++python -m pip install -r tools\phase_analysis_requirements.txt
++python tools\phase_analysis.py inspect out\m4_preview\records\i0001\w0001 --out analysis\m4_30deg_550nm --label "M4: incidence 30 deg, 550 nm"
++start "" "analysis\m4_30deg_550nm\pdf_log.png"
++```
++
++`i0001/w0001` はこの**preview設定**では30度/550nm。別設定ではindexの意味が変わるため、
++必ず batch_plan/metadata の実際の条件値を読む。画像の色範囲は各図で自動設定される。
++ゼロはゼロのまま保存し、log可視化では空白。NaN/Inf は拒否する。
++既存可視化ツールの「two orientations」「CSV」注意文は旧 M2 前提で、M3/M4 に合わない場合がある。
++配向の実設定と固定節点はデータセット直下に保存されている。
++
++目視で判断する対象: 主要ピーク/アークの形と入射条件依存、波長間の変化、
++穴/周期模様/格子段差の有無。鉛直入射では一様な方位角成分が横一様になること。
++**滑らかに見えることだけで物理的正しさは認定しない。**
++固定求積由来の細かい模様が残る場合、配向求積を増やして同じ atlas を再合成できる。
++出射格子だけを増やすと、相対入射補間/面積求積の誤差を詳細表示するだけの場合がある。
++floor や画像ぼかしで穴を埋めて学習データを作る処理は実装していない。
++
++## 2. 無変更の学習側 reader で最終確認
++
++```bat
++python hex_atlas\tools\check_nf_compatibility.py --dataset out\m4_preview --nf-root C:\Users\sy415\workspace\spherical-hg-flow --out out\m4_preview_nf_check.json
++```
++
++PyTorchや学習は起動しない。学習側 checkout の `src/phaseflow/rainbow.py` を直接ロードし、
++コードの SHA256 と Git blob SHA1 を記録する。全レコードについて、条件、質量、g、
++各セル中心の固体角 PDF と NF フレームへの変換、CDF 逆変換と log_prob の一致を検査する。
++データの書換え/修復/再正規化はしない。out JSON も上書きしない。
++
++- 条件: `[wavelength_nm, -ki_y]` (= `[wavelength_nm, sin(inclination)]`)。
++- 配列: `<f8`, C-order、phi_cdf `(Nphi+1,)`、theta_given_phi `(Nphi,Ntheta+1)`、u_edges `(Ntheta+1,)`。
++- 最終レコードの共通座標系は粒子集団の輸送参照系。各結晶の body +y と混同しない。
++  `shape_polar_axis=[0,-1,0]` は既存 NF の条件付けの軸として定義し、意味を metadata に併記する。
++- hg.g は保存セル PDF の一次モーメント。axis_particle_frame は保存入射軸。
++- 材質と形状は氷/六角柱として記録する。水や等体積球半径と偽装しない。
++- 任意方位角の非canonical入射は既定の rainbow 契約では拒否する。
++  旧来の ensemble 契約は compose_atlas.py の `--output-contract ensemble` で明示選択できる。
++- NF の既存 reader は `provenance.source_repository` に rainbow をハードコードしている。
++  元の metadata.source_repository は正しく ice-crystal-phase と記録する。学習コード自体は変更しない。
++
++**CDF単位のreader/サンプラー契約を検査するもので、条件付き学習全体やGPU学習の実行保証ではない。**
++`batch_plan.json` は既存の M3 インデックスを維持し、各レコードに condition を明示追加する。
++現在のNFが1レコード指定の学習CLIを使っている場合も、そのレコードは直接指定できる。
++複数レコードの列挙は学習側の既存ワークフローに渡す。
++
++## 3. 確認後に波長・入射条件だけを増やす
++
++`configs/spectral_dataset.json` は同じ高価な atlas 設定・形状・配向を使用し、
++390..830nm を10nm間隔 (45波長)、-90..90度を5度間隔 (37入射条件) の1665レコードを作る例。
++波長/入射間隔は実験計画用の明示値であり、必要精度を満たすとの保証ではない。
++対称性を利用した負入射角の自動生成/コピーは行わず、指定条件をそのまま合成する。
++
++```bat
++python hex_atlas\tools\run_spectrum.py --exe build\hex_atlas\Release\ice_precompute_atlas.exe --plan hex_atlas\configs\spectral_dataset.json --atlas-root out\m4_atlases --out out\m4_dataset --reuse
++python hex_atlas\tools\check_nf_compatibility.py --dataset out\m4_dataset --nf-root C:\Users\sy415\workspace\spherical-hg-flow --out out\m4_dataset_nf_check.json
++```
++
++previewの450/550/650nmは再追跡せず利用し、他の波長だけ追加生成する。
++既存の一定屈折率 atlas を分散したものとして再利用しない。
++`--reuse` は実行引数・実行ファイル/隣接fatbinのバイト一致・metadata一致を照合し、
++さらに合成器が全 node の光束を監査する。数値配列を無条件に信用してスキップしない。
++同じビルドを別PCへコピーした場合は再利用できるが、再ビルドでバイナリが変わった場合は
++保守的に拒否する。設定変更時に既存 atlas を黙って流用しない。
++未完了 .part は自動削除・採用しない。新たなCDF出力先を使い、失敗ログを先に確認する。
++
++生 atlas は約0.355GiB/波長、45波長で約16.0GiB。CDF配列本体は全体で約0.82GiB。
++metadata/ログ/一時ファイルには別の領域を見込む。圧縮ZIPの大きさで必要ディスクを見積もらない。
++合成はCPU/NumPyであり、GPU事前計算だけの時間では全生成時間を見積もれない。
++
++## 保持したモデル上の制限
++
++本パッチでは相対入射間の双線形補間を変更していない。光路の切替わりやコースティックが
++格子より細かい場合、ピークの位置/幅/弱い成分に誤差が残る。CDF integrity/光束収支が正常でも
++物理的な分布形状まで正しいとは限らない。高解像度の数条件を確認してから全条件へ展開する。
++今回の配向分布の幅を shape/size/気象条件に結び付ける作業は、合意した通り保留する。
+diff --git a/hex_atlas/apps/precompute_atlas.cpp b/hex_atlas/apps/precompute_atlas.cpp
+index 5500ee230c8ed1d13bba61f6b72f5f5a3b027a9d..c7d7fd26d4f5848a2ef179ec4a93f6ddf95033a1 100644
+--- a/hex_atlas/apps/precompute_atlas.cpp
++++ b/hex_atlas/apps/precompute_atlas.cpp
+@@ -1,4 +1,5 @@
+ #include <ice_crystal/atlas.hpp>
++#include <ice_crystal/ice_optics.hpp>
+ #include <rainbow/npy_writer.hpp>
+ #if defined(ICE_ATLAS_HAS_CUDA)
+ #include <ice_crystal/atlas_cuda.hpp>
+@@ -18,7 +19,14 @@
+ namespace
+ {
+ using namespace iceCrystal;
+-struct Options {atlas::Settings s;std::filesystem::path out,modules;int device=0;};
++struct Options
++{
++    atlas::Settings s;
++    std::filesystem::path out,modules;
++    int device=0;
++    bool ice_material=true;
++    optics::IceState optical_state;
++};
+ double real(std::string_view v)
+ {
+     double x=0;const auto r=std::from_chars(v.data(),v.data()+v.size(),x);
+@@ -49,6 +57,12 @@ Options parse(int argc,char** argv)
+         else if(key=="--device") {const auto v=integer(value);if(v>2147483647u)throw std::invalid_argument("Device range.");o.device=int(v);}
+         else if(key=="--radius-mm")s.prism.circumradius_mm=real(value);
+         else if(key=="--length-mm")s.prism.length_mm=real(value);
++        else if(key=="--material")
++        {
++            if(value=="ice")o.ice_material=true;
++            else if(value=="constant")o.ice_material=false;
++            else throw std::invalid_argument("Material must be ice or constant.");
++        }
+         else if(key=="--ior")s.interior_index=real(value);
+         else if(key=="--exterior-ior")s.exterior_index=real(value);
+         else if(key=="--wavelength-nm")s.wavelength_nm=real(value);
+@@ -69,6 +83,18 @@ Options parse(int argc,char** argv)
+     if(seen.count("--device")||seen.count("--modules"))throw std::invalid_argument("CPU binary does not accept CUDA settings.");
+ #endif
+     if(o.out.empty())throw std::invalid_argument("--out required.");
++    if(!seen.count("--wavelength-nm"))throw std::invalid_argument("--wavelength-nm is required (vacuum nm).");
++    if(o.ice_material)
++    {
++        if(seen.count("--ior"))throw std::invalid_argument("Ice index is evaluated from wavelength; --ior requires explicit --material constant.");
++        o.optical_state=optics::evaluate_ice_wb2008(o.s.wavelength_nm);
++        o.s.interior_index=o.optical_state.n;
++    }
++    else
++    {
++        if(!seen.count("--ior"))throw std::invalid_argument("Constant material requires --ior.");
++        o.optical_state={o.s.wavelength_nm,o.s.interior_index,0,0,0,0};
++    }
+     atlas::validate(o.s);return o;
+ }
+ void vec(std::ostream& o,Vec3 v){o<<'['<<v.x<<','<<v.y<<','<<v.z<<']';}
+@@ -76,13 +102,18 @@ int run(int argc,char** argv)
+ {
+     if(argc==2&&std::string_view(argv[1])=="--help")
+     {
+-        std::cout<<"ice_precompute_atlas[_cpu] --out DIR --radius-mm R --length-mm L --ior N --wavelength-nm NM\n"
++        std::cout<<"ice_precompute_atlas[_cpu] --out DIR --radius-mm R --length-mm L --wavelength-nm NM\n"
++          " --material ice (default, WB2008 n(lambda), 200..1100nm) | --material constant --ior N\n"
+           " --incident-theta-intervals T --incident-phi-intervals P --theta NT --phi NP --area-subdivisions S\n"
+           " [--max-internal-hits 2048 --tail-tolerance 1e-12 --batch-rays 64 --max-work-mib 512]\n"
+           " [--max-unresolved-fraction 1e-10 --max-balance-error 1e-10 --exterior-ior 1]\n"
+           "CUDA only: [--modules DIR --device 0]. No random seeds, smoothing, or CPU fallback.\n";return 0;
+     }
+-    const auto o=parse(argc,argv);const auto& s=o.s;rainbow::DatasetDirectory directory(o.out);
++    const auto o=parse(argc,argv);const auto& s=o.s;
++    std::cout<<std::setprecision(17)<<"material="<<(o.ice_material?"ice_wb2008_real_only":"constant")
++             <<" wavelength_nm="<<s.wavelength_nm<<" n="<<s.interior_index
++             <<" kappa_evaluated_not_used="<<o.optical_state.kappa<<'\n';
++    rainbow::DatasetDirectory directory(o.out);
+     try
+     {
+ #if defined(ICE_ATLAS_HAS_CUDA)
+@@ -103,9 +134,9 @@ int run(int argc,char** argv)
+           <<"\"theta_count\":"<<s.theta_count<<",\"phi_count\":"<<s.phi_count<<",\n"
+           <<"\"geometry\":{\"shape\":\"regular_hexagonal_prism\",\"circumradius_mm\":"<<s.prism.circumradius_mm
+           <<",\"full_length_mm\":"<<s.prism.length_mm<<",\"body_long_axis\":[0,1,0]},\n"
+-          <<"\"material\":{\"model\":\"caller_supplied_real_index_at_wavelength\",\"interior_index\":"<<s.interior_index
+-          <<",\"exterior_index\":"<<s.exterior_index<<",\"wavelength_nm\":"<<s.wavelength_nm
+-          <<",\"automatic_ice_dispersion\":false,\"absorption\":false,\"birefringence\":false},\n"
++          <<"\"material\":";
++        optics::write_material_json(meta,o.optical_state,s.exterior_index,o.ice_material);
++        meta<<",\n"
+           <<"\"symmetry\":\"D6h_O3_full_24_scalar_unpolarized\",\n"
+           <<"\"incident_reconstruction\":\"bilinear_theta_phi_in_spherical_incident_frame\",\n"
+           <<"\"incident_formula\":\"k=(sin(t)cos(p),cos(t),sin(t)sin(p));e0=(cos(t)cos(p),-sin(t),cos(t)sin(p));e1=k_cross_e0\",\n"
+diff --git a/hex_atlas/configs/spectral_dataset.json b/hex_atlas/configs/spectral_dataset.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..47bc682e0a4e978e50edf997957b2f3a00c5a004
+--- /dev/null
++++ b/hex_atlas/configs/spectral_dataset.json
+@@ -0,0 +1,123 @@
++{
++  "wavelengths_nm": [
++    390,
++    400,
++    410,
++    420,
++    430,
++    440,
++    450,
++    460,
++    470,
++    480,
++    490,
++    500,
++    510,
++    520,
++    530,
++    540,
++    550,
++    560,
++    570,
++    580,
++    590,
++    600,
++    610,
++    620,
++    630,
++    640,
++    650,
++    660,
++    670,
++    680,
++    690,
++    700,
++    710,
++    720,
++    730,
++    740,
++    750,
++    760,
++    770,
++    780,
++    790,
++    800,
++    810,
++    820,
++    830
++  ],
++  "precompute": {
++    "radius_mm": 0.1,
++    "length_mm": 0.2,
++    "incident_theta_intervals": 45,
++    "incident_phi_intervals": 15,
++    "theta": 180,
++    "phi": 360,
++    "area_subdivisions": 2,
++    "batch_rays": 32,
++    "max_work_mib": 512,
++    "max_internal_hits": 2048,
++    "tail_tolerance": 1e-12,
++    "max_unresolved_fraction": 1e-10,
++    "max_balance_error": 1e-10
++  },
++  "composition": {
++    "inclinations_deg": [
++      -90,
++      -85,
++      -80,
++      -75,
++      -70,
++      -65,
++      -60,
++      -55,
++      -50,
++      -45,
++      -40,
++      -35,
++      -30,
++      -25,
++      -20,
++      -15,
++      -10,
++      -5,
++      0,
++      5,
++      10,
++      15,
++      20,
++      25,
++      30,
++      35,
++      40,
++      45,
++      50,
++      55,
++      60,
++      65,
++      70,
++      75,
++      80,
++      85,
++      90
++    ],
++    "orientation": {
++      "quadrature": {
++        "azimuth": 72,
++        "tilt": 12,
++        "spin": 24
++      },
++      "components": [
++        {
++          "kind": "horizontal_gaussian",
++          "sigma_deg": 3,
++          "fraction": 0.9
++        },
++        {
++          "kind": "isotropic",
++          "fraction": 0.1
++        }
++      ]
++    }
++  }
++}
+diff --git a/hex_atlas/configs/spectral_preview.json b/hex_atlas/configs/spectral_preview.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..352ac672e9cc3d51c307bbe658eb2c89e3761bb5
+--- /dev/null
++++ b/hex_atlas/configs/spectral_preview.json
+@@ -0,0 +1,48 @@
++{
++  "wavelengths_nm": [
++    450,
++    550,
++    650
++  ],
++  "precompute": {
++    "radius_mm": 0.1,
++    "length_mm": 0.2,
++    "incident_theta_intervals": 45,
++    "incident_phi_intervals": 15,
++    "theta": 180,
++    "phi": 360,
++    "area_subdivisions": 2,
++    "batch_rays": 32,
++    "max_work_mib": 512,
++    "max_internal_hits": 2048,
++    "tail_tolerance": 1e-12,
++    "max_unresolved_fraction": 1e-10,
++    "max_balance_error": 1e-10
++  },
++  "composition": {
++    "inclinations_deg": [
++      0,
++      30,
++      60,
++      90
++    ],
++    "orientation": {
++      "quadrature": {
++        "azimuth": 72,
++        "tilt": 12,
++        "spin": 24
++      },
++      "components": [
++        {
++          "kind": "horizontal_gaussian",
++          "sigma_deg": 3,
++          "fraction": 0.9
++        },
++        {
++          "kind": "isotropic",
++          "fraction": 0.1
++        }
++      ]
++    }
++  }
++}
+diff --git a/hex_atlas/data/README.md b/hex_atlas/data/README.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf167fa515bbdbfba2e57e1243c1490f628b6c0a
+--- /dev/null
++++ b/hex_atlas/data/README.md
+@@ -0,0 +1,26 @@
++# Frozen ice optical constants
++
++Warren, S. G., and R. E. Brandt (2008), *Optical constants of ice from the
++ultraviolet to the microwave: A revised compilation*, JGR 113, D14220.
++DOI: 10.1029/2007JD009744.
++
++Author source: https://www.atmos.washington.edu/ice_optical_constants/
++Table: https://www.atmos.washington.edu/ice_optical_constants/IOP_2008_ASCIItable.dat
++
++`wb2008_199_1100nm.dat` preserves the numeric entries from 0.199 through 1.100 um
++(79 rows). The first row brackets the explicitly supported lower bound, 200 nm.
++The data are compiled into `src/ice_optics_table.inc`; no file/network lookup is
++performed in the CUDA ray loop or at run time. Unit conversion: um * 1000 = nm.
++The raw subset SHA256 is
++`71235dd08b3f65fc5fdf638101577d4da12af9cd725da21fa1677c0f91bfddcb`.
++
++Following the author's interpolation instructions: n is linear in log(wavelength),
++log(kappa) is linear in log(wavelength). Knots are returned without interpolation.
++No extrapolation beyond 200..1100 nm. This is the ice-Ih near-melting compilation,
++not an arbitrary temperature/pressure model. The real n is used in the existing
++isotropic nonabsorbing geometric-optics solver. kappa is evaluated and reported
++but **not used**; the solver's kappa remains zero. Birefringence, diffraction,
++absorption and inter-path interference have not been added by this patch.
++
++This is numerical data, not copied paper text or an imported material library.
++Please retain this attribution when reusing the numeric subset.
+diff --git a/hex_atlas/data/wb2008_199_1100nm.dat b/hex_atlas/data/wb2008_199_1100nm.dat
+new file mode 100644
+index 0000000000000000000000000000000000000000..907a4733361dad604a159100f7f498609d690446
+--- /dev/null
++++ b/hex_atlas/data/wb2008_199_1100nm.dat
+@@ -0,0 +1,84 @@
++# Warren & Brandt (2008), DOI 10.1029/2007JD009744.
++# Exact numeric subset of author table IOP_2008_ASCIItable.dat.
++# Source: https://www.atmos.washington.edu/ice_optical_constants/IOP_2008_ASCIItable.dat
++# Columns: vacuum wavelength [um], real index n, imaginary index kappa.
++# 199 nm is a lower bracketing point for the supported 200..1100 nm interval.
++1.990E-001 1.3943 9.565E-011
++2.010E-001 1.3914 3.249E-011
++2.019E-001 1.3901 2.000E-011
++2.100E-001 1.3801 2.000E-011
++2.500E-001 1.3509 2.000E-011
++3.000E-001 1.3339 2.000E-011
++3.500E-001 1.3249 2.000E-011
++3.900E-001 1.3203 2.000E-011
++4.000E-001 1.3194 2.365E-011
++4.100E-001 1.3185 2.669E-011
++4.200E-001 1.3177 3.135E-011
++4.300E-001 1.3170 4.140E-011
++4.400E-001 1.3163 6.268E-011
++4.500E-001 1.3157 9.239E-011
++4.600E-001 1.3151 1.325E-010
++4.700E-001 1.3145 1.956E-010
++4.800E-001 1.3140 2.861E-010
++4.900E-001 1.3135 4.172E-010
++5.000E-001 1.3130 5.889E-010
++5.100E-001 1.3126 8.036E-010
++5.200E-001 1.3121 1.076E-009
++5.300E-001 1.3117 1.409E-009
++5.400E-001 1.3114 1.813E-009
++5.500E-001 1.3110 2.289E-009
++5.600E-001 1.3106 2.839E-009
++5.700E-001 1.3103 3.461E-009
++5.800E-001 1.3100 4.159E-009
++5.900E-001 1.3097 4.930E-009
++6.000E-001 1.3094 5.730E-009
++6.100E-001 1.3091 6.890E-009
++6.200E-001 1.3088 8.580E-009
++6.300E-001 1.3085 1.040E-008
++6.400E-001 1.3083 1.220E-008
++6.500E-001 1.3080 1.430E-008
++6.600E-001 1.3078 1.660E-008
++6.700E-001 1.3076 1.890E-008
++6.800E-001 1.3073 2.090E-008
++6.900E-001 1.3071 2.400E-008
++7.000E-001 1.3069 2.900E-008
++7.100E-001 1.3067 3.440E-008
++7.200E-001 1.3065 4.030E-008
++7.300E-001 1.3062 4.300E-008
++7.400E-001 1.3060 4.920E-008
++7.500E-001 1.3059 5.870E-008
++7.600E-001 1.3057 7.080E-008
++7.700E-001 1.3055 8.580E-008
++7.800E-001 1.3053 1.020E-007
++7.900E-001 1.3051 1.180E-007
++8.000E-001 1.3049 1.340E-007
++8.100E-001 1.3047 1.400E-007
++8.200E-001 1.3046 1.430E-007
++8.300E-001 1.3044 1.450E-007
++8.400E-001 1.3042 1.510E-007
++8.500E-001 1.3040 1.830E-007
++8.600E-001 1.3039 2.150E-007
++8.700E-001 1.3037 2.650E-007
++8.800E-001 1.3035 3.350E-007
++8.900E-001 1.3033 3.920E-007
++9.000E-001 1.3032 4.200E-007
++9.100E-001 1.3030 4.440E-007
++9.200E-001 1.3028 4.740E-007
++9.300E-001 1.3027 5.110E-007
++9.400E-001 1.3025 5.530E-007
++9.500E-001 1.3023 6.020E-007
++9.600E-001 1.3022 7.550E-007
++9.700E-001 1.3020 9.260E-007
++9.800E-001 1.3019 1.120E-006
++9.900E-001 1.3017 1.330E-006
++1.000E+000 1.3015 1.620E-006
++1.010E+000 1.3014 2.000E-006
++1.020E+000 1.3012 2.250E-006
++1.030E+000 1.3010 2.330E-006
++1.040E+000 1.3009 2.330E-006
++1.050E+000 1.3007 2.170E-006
++1.060E+000 1.3005 1.960E-006
++1.070E+000 1.3003 1.810E-006
++1.080E+000 1.3002 1.740E-006
++1.090E+000 1.3000 1.730E-006
++1.100E+000 1.2998 1.700E-006
+diff --git a/hex_atlas/include/ice_crystal/ice_optics.hpp b/hex_atlas/include/ice_crystal/ice_optics.hpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..124f6ce491145cd6529385b093bbc3965ecec4e7
+--- /dev/null
++++ b/hex_atlas/include/ice_crystal/ice_optics.hpp
+@@ -0,0 +1,20 @@
++#pragma once
++#include <ostream>
++
++namespace iceCrystal::optics
++{
++// Host-side monochromatic state; no wavelength lookup in the CUDA ray loop.
++// n is used by the existing isotropic, nonabsorbing tracer. kappa is evaluated
++// and reported but is NOT applied to that tracer. No temperature extrapolation.
++struct IceState
++{
++    double wavelength_nm = 0;
++    double n = 0;
++    double kappa = 0;
++    double lower_nm = 0, upper_nm = 0, log_wavelength_fraction = 0;
++};
++[[nodiscard]] IceState evaluate_ice_wb2008(double vacuum_wavelength_nm);
++// Writes one JSON object. The caller owns the enclosing document and locale.
++void write_material_json(std::ostream& out, const IceState& state,
++                         double exterior_index, bool ice_material);
++} // namespace iceCrystal::optics
+diff --git a/hex_atlas/python/compose_atlas.py b/hex_atlas/python/compose_atlas.py
+index b7214810e1b78327ce88c06d0c7a3033d81123fb..f018770f6ae3a66bbbd725dbbe98aa40941f2469 100644
+--- a/hex_atlas/python/compose_atlas.py
++++ b/hex_atlas/python/compose_atlas.py
+@@ -62,8 +62,8 @@ def incidents(config: dict[str,Any]) -> list[tuple[np.ndarray,dict[str,Any]]]:
+ 
+ def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
+              f: np.ndarray, plan_hash: str, rule_meta: dict[str,Any], condition: dict[str,Any],
+-             source_hash: str, azimuth_integration: dict[str,Any]) -> dict[str,Any]:
+-    g = report['g']; material = a.meta['material']; geom = a.meta['geometry'].copy()
++             source_hash: str, azimuth_integration: dict[str,Any], output_contract: str = 'rainbow') -> dict[str,Any]:
++    g = report['g']; material = dict(a.meta['material']); geom = a.meta['geometry'].copy()
+     geom.update(projected_area_mm2=expected,projected_area_m2=expected*1e-6,
+         projected_area_method='deterministic_orientation_quadrature_of_exact_facet_projection')
+     total = report['resolved_mass_mm2']
+@@ -72,15 +72,30 @@ def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
+         orientation_convergence_certified=False,incident_atlas_convergence_certified=False,
+         continuous_wave_solution_certified=False,
+         maximum_accepted_l1_mass_error=1e-10,maximum_accepted_lost_probability_mass=1e-12)
+-    return dict(schema='rainbow.phase_cdf.numpy.v2',complete=True,
+-        generator_version='ice.deterministic_atlas.m3.polar_azimuth.v1',backend='numpy_deterministic_atlas_convolution',
++    # Material labels from old M3 atlases are not promoted to dispersive ice.
++    material.setdefault('wavelength_convention','vacuum_nm')
++    common = dict(source_repository='https://github.com/Somatic-Cell/ice-crystal-phase',
++        source_base_commit='1cf6758d28473678ed141654f8c0c9b4f21197de',
++        azimuth_periodic=True,particle_frame_handedness='right',particle_up_axis=[0,1,0],shape_polar_axis=[0,-1,0],
++        phi_range_rad=[-math.pi,math.pi],
++        transport_reference_frame='ensemble_reference; not an individual crystal body frame',
++        shape_polar_axis_semantics='oriented transport conditioning axis -y; body c-axis is geometry.body_long_axis')
++    if output_contract=='rainbow':
++        k=f[:,2]
++        if abs(k[2])>2e-14 or k[0]<-2e-14:
++            raise ValueError('RainbowReference requires canonical ki=(cos(alpha),-sin(alpha),0); no implicit rotation of a non-axisymmetric ensemble')
++        common['incident_inclination_degrees']=math.degrees(math.atan2(-k[1],max(0.,k[0])))
++    common['nf_condition_axes']=['wavelength_nm','dot([0,-1,0],incident_propagation)']
++    common['geometry_and_orientation_fixed_within_dataset']=True
++    return dict(**common,schema='rainbow.phase_cdf.numpy.v2',complete=True,
++        generator_version='ice.deterministic_atlas.m4.spectral_nf.v1',backend='numpy_deterministic_atlas_convolution',
+         source_sha256=source_hash,dtype='<f8',order='C',theta_count=a.nt,phi_count=a.np,
+         density_measure='solid_angle_sr',cell_model='constant_density_per_spherical_cell',
+         coordinates='u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)',cdf_axis_order=['phi_cell','theta_edge'],
+         normalization='integral_p_domega_equals_one',input_polarization='unpolarized',
+         direction_convention='physical_propagation',theta_zero='forward',theta_pi='backward',
+-        coordinate_contract_id='ice.phase_cdf.ensemble_coordinates.v1',
+-        sampling_frame_layout='rows_xyz_columns_e0_e1_k',sampling_frame_map='local_column_to_ensemble_reference_column',
++        coordinate_contract_id='rainbow.phase_cdf.coordinates.v1' if output_contract=='rainbow' else 'ice.phase_cdf.ensemble_coordinates.v1',
++        sampling_frame_layout='rows_xyz_columns_e0_e1_k',sampling_frame_map='local_column_to_particle_column' if output_contract=='rainbow' else 'local_column_to_ensemble_reference_column',
+         sampling_frame_columns=f.tolist(),query_frame_axis=f[:,2].tolist(),query_frame_e0=f[:,0].tolist(),
+         wavelength_nm=material['wavelength_nm'],interior_index=material['interior_index'],exterior_index=material['exterior_index'],
+         geometry=geom,material=material,
+@@ -89,6 +104,7 @@ def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
+         single_scattering_albedo=1,stage='incoherent',diffraction_policy=dict(computed=False,selected_output_includes_diffraction=False),
+         inter_path_interference=False,tir_relative_phase_retained=True,
+         orientation=dict(representation='deterministic_SO3_number_quadrature',rule=rule_meta,
++            model_parameter_policy='explicit_user_parameters_not_aerodynamic_prediction',
+             plan_sha256=plan_hash,randomness=False,plan_embedded=False,plan_location='dataset_root',
+             azimuth_integration=azimuth_integration),
+         atlas=dict(files_sha256=a.hashes,incident_theta_intervals=a.it,incident_phi_intervals=a.ip,
+@@ -101,38 +117,48 @@ def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
+             residual_estimator='same_covariant_incident_interpolation_as_response'),
+         storage_processing=dict(gaussian_sigma_degrees=0,coarsening_tv=0,
+             mass_conservative_aggregation=False,g_source=g,g_stored=g),
+-        hg=dict(g=g,method='first_moment_of_saved_cell_pdf',target='saved_cdf',
++        hg=dict(g=g,axis_particle_frame=f[:,2].tolist(),method='first_moment_of_saved_cell_pdf',target='saved_cdf',
+             cosine_convention='dot(incident_propagation,outgoing_propagation)'),
+         condition=condition,quality=quality)
+ 
+ 
+-def run(atlas_paths: list[Path], config_path: Path, out: Path) -> None:
++def run(atlas_paths: list[Path], config_path: Path, out: Path, output_contract: str = 'rainbow') -> None:
+     with config_path.open(encoding='utf-8') as f:
+         config = json.load(f)
+     if set(config) - {'orientation','inclinations_deg','directions'} or 'orientation' not in config:
+         raise ValueError('Unknown/missing composition configuration keys')
+-    rotations, weights, rule_meta = orientation_rule(config['orientation'])
+-    # These arrays remain a reproducible reference quadrature. The actual
+-    # per-incident operator, including exact uniform-alpha integration at the
+-    # two poles, is identified in each record and in the final batch manifest.
+-    rule_meta = dict(rule_meta, vertical_uniform_azimuth_policy={
+-        'version': 'analytic_uniform_alpha_at_exact_vertical_v1',
+-        'reference_arrays': 'discrete_reference_not_literal_nodes_at_analytic_conditions',
+-        'eligible_components': ['horizontal_gaussian', 'isotropic'],
+-        'fixed_components_unchanged': True,
+-        'nonvertical_conditions_unchanged': True,
+-    })
+     incident_list = incidents(config)
+     atlases: list[Atlas] = []
+     part = None
+     try:
+         for path in atlas_paths:
+             atlases.append(Atlas(path))
++        if not atlases:
++            raise ValueError('At least one atlas is required')
+         first = atlases[0]
+         geometry = first.meta['geometry']
++        rotations,weights,rule_meta=orientation_rule(config['orientation'])
++        rule_meta=dict(rule_meta,
++            vertical_uniform_azimuth_policy={
++                'version':'analytic_uniform_alpha_at_exact_vertical_v1',
++                'reference_arrays':'discrete_reference_not_literal_nodes_at_analytic_conditions',
++                'eligible_components':['horizontal_gaussian','isotropic'],
++                'fixed_components_unchanged':True,'nonvertical_conditions_unchanged':True})
++        if output_contract not in ('rainbow','ensemble'):
++            raise ValueError('Unknown output contract')
++        if output_contract=='rainbow':
++            for k,_ in incident_list:
++                if abs(k[2])>2e-14 or k[0]<-2e-14:
++                    raise ValueError('Noncanonical incident direction is not RainbowReference-compatible; select --output-contract ensemble explicitly')
+         for a in atlases[1:]:
+             if (a.it,a.ip,a.nt,a.np)!=(first.it,first.ip,first.nt,first.np) or a.meta['geometry']!=geometry or not np.array_equal(a.edges,first.edges) or not np.array_equal(a.area,first.area):
+                 raise ValueError('Batch atlases must share geometry, angular grids, and areas')
++        material_keys=('model','exterior_index','absorption','birefringence')
++        for a in atlases[1:]:
++            if any(a.meta['material'].get(k)!=first.meta['material'].get(k) for k in material_keys):
++                raise ValueError('A spectral batch must use one material model and exterior medium')
++            if a.meta['transport']!=first.meta['transport']:
++                raise ValueError('A spectral batch must use one transport/audit policy')
+         wavelengths = [float(a.meta['material']['wavelength_nm']) for a in atlases]
+         if len(set(wavelengths))!=len(wavelengths) or any(not math.isfinite(w) or w<=0 for w in wavelengths):
+             raise ValueError('Unique positive wavelength per atlas required')
+@@ -145,9 +171,11 @@ def run(atlas_paths: list[Path], config_path: Path, out: Path) -> None:
+         plan_hashes = {n:sha256_file(part/n) for n in ('orientation_model.json','orientation_rotations.npy','orientation_weights.npy')}
+         import hashlib
+         plan_hash = hashlib.sha256(json.dumps(plan_hashes,sort_keys=True).encode('ascii')).hexdigest()
+-        source_hash = hashlib.sha256((sha256_file(Path(__file__))+sha256_file(Path(__file__).with_name('atlas_math.py'))).encode('ascii')).hexdigest()
++        source_files=['compose_atlas.py','atlas_math.py']
++        source_hash = hashlib.sha256(''.join(sha256_file(Path(__file__).with_name(n)) for n in source_files).encode('ascii')).hexdigest()
+         plan: dict[str,Any] = dict(schema='ice.deterministic_phase_dataset.v1',complete=False,
+-            per_record_schema='rainbow.phase_cdf.numpy.v2',condition_axes=['incident','wavelength'],
++            nf_condition_order=['wavelength_nm','dot([0,-1,0],incident_propagation)'],
++            output_contract=output_contract,per_record_schema='rainbow.phase_cdf.numpy.v2',condition_axes=['incident','wavelength'],
+             incident_directions=[k.tolist() for k,_ in incident_list],wavelengths_nm=wavelengths,
+             orientation_plan_sha256=plan_hash,orientation_files_sha256=plan_hashes,
+             input_config=config,atlases=[a.hashes for a in atlases],source_sha256=source_hash,
+@@ -165,11 +193,11 @@ def run(atlas_paths: list[Path], config_path: Path, out: Path) -> None:
+                 relative=Path('records')/f'i{i:04d}'/f'w{w:04d}'
+                 record=part/relative;record.mkdir(parents=True)
+                 write_npy(record/'phi_cdf.npy',phi);write_npy(record/'theta_given_phi_cdf.npy',theta);write_npy(record/'u_edges.npy',a.edges)
+-                m=metadata(a,expected,residual,report,fr,plan_hash,rule_meta,condition,source_hash,azimuth_integration)
++                m=metadata(a,expected,residual,report,fr,plan_hash,rule_meta,condition,source_hash,azimuth_integration,output_contract)
+                 write_json(record/'metadata.json',m)
+                 record_hashes={name:sha256_file(record/name) for name in ('metadata.json','phi_cdf.npy','theta_given_phi_cdf.npy','u_edges.npy')}
+                 plan['records'].append(dict(incident_index=i,wavelength_index=w,path=relative.as_posix(),
+-                    ki=ki.tolist(),wavelength_nm=wavelengths[w],g=report['g'],files_sha256=record_hashes,
++                    condition=[wavelengths[w],-float(ki[1])],ki=ki.tolist(),wavelength_nm=wavelengths[w],g=report['g'],files_sha256=record_hashes,
+                     azimuth_integration=azimuth_integration))
+                 print(f"record i={i} w={w} mass=1 g={report['g']:.17g} A={expected:.17g}")
+             print(f"incident_complete i={i} offline_seconds={time.perf_counter()-start:.6f}")
+@@ -192,9 +220,10 @@ def main() -> None:
+     p.add_argument('--atlas',nargs='+',type=Path,required=True)
+     p.add_argument('--config',type=Path,required=True)
+     p.add_argument('--out',type=Path,required=True)
++    p.add_argument('--output-contract',choices=['rainbow','ensemble'],default='rainbow',help='rainbow: strict NF canonical incidents; ensemble: explicit legacy arbitrary-vector records')
+     args=p.parse_args()
+     try:
+-        run(args.atlas,args.config,args.out)
++        run(args.atlas,args.config,args.out,args.output_contract)
+     except Exception as e:
+         print(f"compose_atlas failed: {e!a}",file=sys.stderr)
+         raise SystemExit(2)
+diff --git a/hex_atlas/src/ice_optics.cpp b/hex_atlas/src/ice_optics.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..ddb7c969c6c161b8fcb856f4a0e459a75b9e09fb
+--- /dev/null
++++ b/hex_atlas/src/ice_optics.cpp
+@@ -0,0 +1,49 @@
++#include <ice_crystal/ice_optics.hpp>
++#include <algorithm>
++#include <cmath>
++#include <iterator>
++#include <stdexcept>
++
++namespace iceCrystal::optics
++{
++namespace
++{
++struct Entry { double nm, n, k; };
++#include "ice_optics_table.inc"
++}
++IceState evaluate_ice_wb2008(double wavelength_nm)
++{
++    if(!std::isfinite(wavelength_nm) || wavelength_nm < 200 || wavelength_nm > 1100)
++        throw std::invalid_argument("Warren-Brandt 2008 ice: supported vacuum wavelengths are 200..1100 nm; no extrapolation.");
++    const auto* b=std::lower_bound(std::begin(ice_table),std::end(ice_table),wavelength_nm,
++        [](const Entry& e,double x){return e.nm<x;});
++    if(b==std::end(ice_table))throw std::logic_error("Missing ice optical bracket.");
++    if(b->nm==wavelength_nm)return {wavelength_nm,b->n,b->k,b->nm,b->nm,0};
++    const auto& a=*(b-1);
++    const double t=std::log(wavelength_nm/a.nm)/std::log(b->nm/a.nm);
++    // The author specifies n versus log(lambda), and log(k) versus log(lambda).
++    const double n=a.n+t*(b->n-a.n);
++    const double k=std::exp(std::log(a.k)+t*(std::log(b->k)-std::log(a.k)));
++    if(!(n>0 && k>0 && std::isfinite(n) && std::isfinite(k)))
++        throw std::runtime_error("Invalid ice optical state.");
++    return {wavelength_nm,n,k,a.nm,b->nm,t};
++}
++void write_material_json(std::ostream& o,const IceState& s,double exterior,bool ice)
++{
++    o<<"{\"model\":\""<<(ice?"ice_ih_warren_brandt_2008_real_only":"constant")<<"\",";
++    o<<"\"wavelength_convention\":\"vacuum_nm\",\"wavelength_nm\":"<<s.wavelength_nm
++     <<",\"wavelength_requested_nm\":"<<s.wavelength_nm<<",\"wavelength_evaluated_nm\":"<<s.wavelength_nm
++     <<",\"interior_index\":"<<s.n<<",\"exterior_index\":"<<exterior
++     <<",\"interior_index_evaluated_fp64\":"<<s.n<<",\"interior_index_solver_fp64\":"<<s.n
++     <<",\"automatic_ice_dispersion\":"<<(ice?"true":"false")
++     <<",\"absorption\":false,\"birefringence\":false,\"absorption_model\":\"ignored_k_equals_zero\",\"kappa_solver\":0";
++    if(ice)
++        o<<",\"source_doi\":\"10.1029/2007JD009744\",\"reference_state\":\"ice_Ih_near_melting_compilation\""
++         <<",\"source_url\":\"https://www.atmos.washington.edu/ice_optical_constants/IOP_2008_ASCIItable.dat\""
++         <<",\"table_subset_sha256\":\"71235dd08b3f65fc5fdf638101577d4da12af9cd725da21fa1677c0f91bfddcb\",\"supported_nm\":[200,1100]"
++         <<",\"n_interpolation\":\"linear_n_in_log_vacuum_wavelength\",\"kappa_interpolation\":\"linear_log_kappa_in_log_vacuum_wavelength\""
++         <<",\"temperature_dependence_computed\":false,\"kappa_evaluated_not_used\":"<<s.kappa
++         <<",\"bracket_nm\":["<<s.lower_nm<<','<<s.upper_nm<<"],\"log_wavelength_fraction\":"<<s.log_wavelength_fraction;
++    o<<'}';
++}
++} // namespace iceCrystal::optics
+diff --git a/hex_atlas/src/ice_optics_table.inc b/hex_atlas/src/ice_optics_table.inc
+new file mode 100644
+index 0000000000000000000000000000000000000000..79deddfad59ddfcd1b70d87781fef9e2f310fe47
+--- /dev/null
++++ b/hex_atlas/src/ice_optics_table.inc
+@@ -0,0 +1,82 @@
++// Generated numeric transcription; source and reviewable rows: ../data/wb2008_199_1100nm.dat
++constexpr Entry ice_table[] = {
++    {199, 1.3943, 9.565E-011},
++    {201, 1.3914, 3.249E-011},
++    {201.9, 1.3901, 2.000E-011},
++    {210, 1.3801, 2.000E-011},
++    {250, 1.3509, 2.000E-011},
++    {300, 1.3339, 2.000E-011},
++    {350, 1.3249, 2.000E-011},
++    {390, 1.3203, 2.000E-011},
++    {400, 1.3194, 2.365E-011},
++    {410, 1.3185, 2.669E-011},
++    {420, 1.3177, 3.135E-011},
++    {430, 1.3170, 4.140E-011},
++    {440, 1.3163, 6.268E-011},
++    {450, 1.3157, 9.239E-011},
++    {460, 1.3151, 1.325E-010},
++    {470, 1.3145, 1.956E-010},
++    {480, 1.3140, 2.861E-010},
++    {490, 1.3135, 4.172E-010},
++    {500, 1.3130, 5.889E-010},
++    {510, 1.3126, 8.036E-010},
++    {520, 1.3121, 1.076E-009},
++    {530, 1.3117, 1.409E-009},
++    {540, 1.3114, 1.813E-009},
++    {550, 1.3110, 2.289E-009},
++    {560, 1.3106, 2.839E-009},
++    {570, 1.3103, 3.461E-009},
++    {580, 1.3100, 4.159E-009},
++    {590, 1.3097, 4.930E-009},
++    {600, 1.3094, 5.730E-009},
++    {610, 1.3091, 6.890E-009},
++    {620, 1.3088, 8.580E-009},
++    {630, 1.3085, 1.040E-008},
++    {640, 1.3083, 1.220E-008},
++    {650, 1.3080, 1.430E-008},
++    {660, 1.3078, 1.660E-008},
++    {670, 1.3076, 1.890E-008},
++    {680, 1.3073, 2.090E-008},
++    {690, 1.3071, 2.400E-008},
++    {700, 1.3069, 2.900E-008},
++    {710, 1.3067, 3.440E-008},
++    {720, 1.3065, 4.030E-008},
++    {730, 1.3062, 4.300E-008},
++    {740, 1.3060, 4.920E-008},
++    {750, 1.3059, 5.870E-008},
++    {760, 1.3057, 7.080E-008},
++    {770, 1.3055, 8.580E-008},
++    {780, 1.3053, 1.020E-007},
++    {790, 1.3051, 1.180E-007},
++    {800, 1.3049, 1.340E-007},
++    {810, 1.3047, 1.400E-007},
++    {820, 1.3046, 1.430E-007},
++    {830, 1.3044, 1.450E-007},
++    {840, 1.3042, 1.510E-007},
++    {850, 1.3040, 1.830E-007},
++    {860, 1.3039, 2.150E-007},
++    {870, 1.3037, 2.650E-007},
++    {880, 1.3035, 3.350E-007},
++    {890, 1.3033, 3.920E-007},
++    {900, 1.3032, 4.200E-007},
++    {910, 1.3030, 4.440E-007},
++    {920, 1.3028, 4.740E-007},
++    {930, 1.3027, 5.110E-007},
++    {940, 1.3025, 5.530E-007},
++    {950, 1.3023, 6.020E-007},
++    {960, 1.3022, 7.550E-007},
++    {970, 1.3020, 9.260E-007},
++    {980, 1.3019, 1.120E-006},
++    {990, 1.3017, 1.330E-006},
++    {1000, 1.3015, 1.620E-006},
++    {1010, 1.3014, 2.000E-006},
++    {1020, 1.3012, 2.250E-006},
++    {1030, 1.3010, 2.330E-006},
++    {1040, 1.3009, 2.330E-006},
++    {1050, 1.3007, 2.170E-006},
++    {1060, 1.3005, 1.960E-006},
++    {1070, 1.3003, 1.810E-006},
++    {1080, 1.3002, 1.740E-006},
++    {1090, 1.3000, 1.730E-006},
++    {1100, 1.2998, 1.700E-006},
++};
+diff --git a/hex_atlas/tests/cli_test.py b/hex_atlas/tests/cli_test.py
+index d23e6ce3befd56a135d2cb24d6b6a69c4b41e79a..aab1dbc2f26028fb3babd6bf6853b6b505aa67f1 100644
+--- a/hex_atlas/tests/cli_test.py
++++ b/hex_atlas/tests/cli_test.py
+@@ -23,7 +23,7 @@ def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+ 
+ with tempfile.TemporaryDirectory(prefix='ice_atlas_cli_') as tmp:
+     root=Path(tmp)
+-    base=[exe,'--radius-mm','.1','--length-mm','.2','--ior','1.31',
++    base=[exe,'--radius-mm','.1','--length-mm','.2','--material','constant','--ior','1.31',
+           '--incident-theta-intervals','3','--incident-phi-intervals','2',
+           '--theta','12','--phi','24','--area-subdivisions','2']
+     paths=[]
+diff --git a/hex_atlas/tests/ice_optics_tests.cpp b/hex_atlas/tests/ice_optics_tests.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..614c4e52aead2e3c7e524b1bf1a530403b2fecb3
+--- /dev/null
++++ b/hex_atlas/tests/ice_optics_tests.cpp
+@@ -0,0 +1,43 @@
++#include <ice_crystal/ice_optics.hpp>
++#include <cmath>
++#include <iostream>
++#include <fstream>
++#include <sstream>
++#include <string>
++#include <limits>
++#include <stdexcept>
++using iceCrystal::optics::evaluate_ice_wb2008;
++void check(bool value){if(!value)throw std::runtime_error("ice optical test failed");}
++int main(int argc, char** argv)
++{
++    try {
++        check(evaluate_ice_wb2008(450).n==1.3157);
++        check(evaluate_ice_wb2008(550).n==1.3110);
++        check(evaluate_ice_wb2008(650).n==1.3080);
++        const auto s=evaluate_ice_wb2008(std::sqrt(550.0*560.0));
++        check(std::abs(s.n-(1.3110+1.3106)/2)<4e-16);
++        check(std::abs(s.kappa/std::sqrt(2.289e-9*2.839e-9)-1)<5e-15);
++        check(evaluate_ice_wb2008(200).lower_nm==199);
++        check(evaluate_ice_wb2008(1100).n==1.2998);
++        for(double x:{199.,1101.,0.,std::numeric_limits<double>::infinity(),std::numeric_limits<double>::quiet_NaN()}) {
++            bool caught=false;try{(void)evaluate_ice_wb2008(x);}catch(const std::invalid_argument&){caught=true;}check(caught);
++        }
++        double last=evaluate_ice_wb2008(200).n;
++        for(int w=201;w<=1100;++w){const auto p=evaluate_ice_wb2008(w);check(p.n<last);last=p.n;}
++        if(argc==2) {
++            std::ifstream input(argv[1]);check(bool(input));
++            std::string line;unsigned count=0;
++            while(std::getline(input,line)) {
++                if(line.empty()||line.front()=='#')continue;
++                std::istringstream row(line);double um=0,n=0,k=0;check(bool(row>>um>>n>>k));
++                const double nm=1000*um;
++                if(nm<200||nm>1100)continue;
++                const auto v=evaluate_ice_wb2008(nm);
++                check(std::abs(v.n-n)<1e-15);check(std::abs(v.kappa/k-1)<5e-13);++count;
++            }
++            check(count==78);
++        }
++        std::cout<<"WB2008 exact knots / log-wavelength interpolation / domain: PASS\n";
++        return 0;
++    } catch(const std::exception& e) {std::cerr<<e.what()<<'\n';return 1;}
++}
+diff --git a/hex_atlas/tests/spectral_cli_test.py b/hex_atlas/tests/spectral_cli_test.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f25497a213ce7a27af3ec0c8b7d9b5d01df3520
+--- /dev/null
++++ b/hex_atlas/tests/spectral_cli_test.py
+@@ -0,0 +1,98 @@
++"""End-to-end WB2008 -> deterministic CDF -> actual optional NF reader.
++
++Runs the passed executable: under CUDA CTest this is the CUDA binary, not CPU.
++The optional third argument is a spherical-hg-flow checkout; nothing is vendored.
++"""
++from pathlib import Path
++import copy
++import json
++import os
++import subprocess
++import sys
++import tempfile
++import numpy as np
++
++exe=Path(sys.argv[1]).resolve()
++repo=Path(sys.argv[2]).resolve()
++nf_root=Path(sys.argv[3]).resolve() if len(sys.argv)>3 else None
++sys.path[:0]=[str(repo/'python'),str(repo/'hex_atlas/tools')]
++from rainbow_dataset import PhaseRecord
++from check_nf_compatibility import check_dataset
++runner=repo/'hex_atlas/tools/run_spectrum.py'
++composer=repo/'hex_atlas/python/compose_atlas.py'
++
++
++def execute(args, expected=0):
++    result=subprocess.run([str(v) for v in args],capture_output=True)
++    if result.returncode!=expected:
++        raise AssertionError(f'exit={result.returncode}, expected={expected}; stdout={result.stdout!r}; stderr={result.stderr!r}')
++    return result
++
++
++with tempfile.TemporaryDirectory(prefix='ice_spectral_') as temporary:
++    root=Path(temporary)
++    plan=dict(wavelengths_nm=[450,550,650],precompute=dict(radius_mm=.1,length_mm=.2,
++        incident_theta_intervals=3,incident_phi_intervals=2,theta=12,phi=24,
++        area_subdivisions=2,batch_rays=8,max_work_mib=32),
++        composition=dict(inclinations_deg=[-90,0,35,90],orientation=dict(
++            quadrature=dict(azimuth=4,tilt=4,spin=3),components=[
++                dict(kind='horizontal_gaussian',sigma_deg=3,fraction=.9),dict(kind='isotropic',fraction=.1)])))
++    path=root/'plan.json';path.write_text(json.dumps(plan),encoding='utf-8')
++    args=[sys.executable,runner,'--exe',exe,'--plan',path,'--atlas-root',root/'atlases']
++    execute([*args,'--out',root/'dry','--dry-run'])
++    assert not (root/'atlases').exists() and not (root/'dry').exists()
++    execute([*args,'--out',root/'dataset'])
++    metas=[];arrays=[];original_times=[]
++    for w,n in zip(plan['wavelengths_nm'],[1.3157,1.3110,1.3080]):
++        p=root/'atlases'/f'lambda_{w}_nm'
++        m=json.loads((p/'metadata.json').read_text())
++        assert m['material']['interior_index']==n
++        assert m['material']['automatic_ice_dispersion'] is True
++        assert m['material']['wavelength_evaluated_nm']==w
++        assert m['material']['absorption_model']=='ignored_k_equals_zero'
++        assert m['material']['kappa_solver']==0
++        arrays.append(np.load(p/'mass_mm2.npy'))
++        original_times.append((p/'mass_mm2.npy').stat().st_mtime_ns)
++        metas.append(m)
++    assert not np.array_equal(arrays[0],arrays[1]) and not np.array_equal(arrays[1],arrays[2])
++    index=json.loads((root/'dataset/batch_plan.json').read_text())
++    assert index['complete'] and len(index['records'])==12
++    cdf=[]
++    for row in index['records']:
++        with PhaseRecord(root/'dataset'/row['path'],validate=True) as r:
++            m=r.metadata
++            assert m['coordinate_contract_id']=='rainbow.phase_cdf.coordinates.v1'
++            assert m['material']['wavelength_convention']=='vacuum_nm'
++            assert m['azimuth_periodic'] is True
++            assert m['shape_polar_axis']==[0,-1,0]
++            np.testing.assert_allclose(m['hg']['axis_particle_frame'],r.frame[:,2],rtol=0,atol=0)
++            np.testing.assert_allclose(row['condition'],[m['wavelength_nm'],-r.frame[1,2]],atol=1e-14)
++            cdf.append(np.diff(r.phi_cdf)[:,None]*np.diff(r.theta_cdf,axis=1))
++    assert np.max(np.abs(cdf[3]-cdf[4]))>1e-10, 'Wavelength did not change the saved CDF'
++    execute([*args,'--out',root/'repeat','--reuse'])
++    for w,t in zip(plan['wavelengths_nm'],original_times):
++        assert (root/'atlases'/f'lambda_{w}_nm'/'mass_mm2.npy').stat().st_mtime_ns==t
++    for row in index['records']:
++        for filename in ['phi_cdf.npy','theta_given_phi_cdf.npy','u_edges.npy']:
++            assert (root/'repeat'/row['path']/filename).read_bytes()==(root/'dataset'/row['path']/filename).read_bytes()
++    if nf_root is not None:
++        report=check_dataset(root/'dataset',nf_root)
++        assert len(report['records'])==12
++        print('UNMODIFIED RainbowReference: 12 records, source blob='+report['reference_module']['git_blob_sha1'])
++    changed=copy.deepcopy(plan);changed['precompute']['length_mm']=.3
++    path.write_text(json.dumps(changed),encoding='utf-8')
++    execute([*args,'--out',root/'reject_cache','--reuse'],2)
++    assert not (root/'reject_cache').exists()
++    # No implicit promotion of --ior into an ice model; no ignored wavelength.
++    basic=[exe,'--radius-mm','.1','--length-mm','.2','--incident-theta-intervals','1',
++           '--incident-phi-intervals','1','--theta','12','--phi','24','--area-subdivisions','1']
++    execute([*basic,'--wavelength-nm','550','--ior','1.31','--out',root/'bad1'],2)
++    execute([*basic,'--wavelength-nm','1101','--out',root/'bad2'],2)
++    execute([*basic,'--material','constant','--out',root/'bad3'],2)
++    for p in ('bad1','bad2','bad3'):
++        assert not (root/p).exists() and not (root/(p+'.part')).exists()
++    cfg=copy.deepcopy(plan['composition']);cfg.pop('inclinations_deg');cfg['directions']=[[1,0,1]]
++    cfg_path=root/'arbitrary.json';cfg_path.write_text(json.dumps(cfg),encoding='utf-8')
++    execute([sys.executable,composer,'--atlas',root/'atlases/lambda_550_nm','--config',cfg_path,'--out',root/'bad_contract'],2)
++    assert not (root/'bad_contract').exists()
++    print('PASS: dispersive 3-wave/4-incident CDF, no ODF changes, unchanged cached arrays, explicit failure gates')
+diff --git a/hex_atlas/tools/check_nf_compatibility.py b/hex_atlas/tools/check_nf_compatibility.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..560ee4308782ff55e7354a9c629ff9407e463e17
+--- /dev/null
++++ b/hex_atlas/tools/check_nf_compatibility.py
+@@ -0,0 +1,95 @@
++#!/usr/bin/env python3
++"""Exercise the UNMODIFIED downstream RainbowReference, not a substitute reader.
++
++No PyTorch import or training is required. Module is loaded directly from the
++user's spherical-hg-flow checkout; its exact SHA256/Git blob identity is logged.
++Inputs are read-only. CDFs are never repaired, rescaled, or given a PDF floor.
++"""
++from __future__ import annotations
++import argparse
++import hashlib
++import importlib.util
++import json
++import math
++from pathlib import Path
++import sys
++import numpy as np
++
++
++def checked_reference(nf_root: Path):
++    path=nf_root/'src/phaseflow/rainbow.py'
++    raw=path.read_bytes()
++    name='_downstream_rainbow_reference'
++    spec=importlib.util.spec_from_file_location(name,path)
++    if spec is None or spec.loader is None:
++        raise ImportError(f'Cannot import downstream reference from {path}')
++    module=importlib.util.module_from_spec(spec);sys.modules[name]=module
++    spec.loader.exec_module(module)
++    return module.RainbowReference,dict(path=str(path.resolve()),sha256=hashlib.sha256(raw).hexdigest(),
++        git_blob_sha1=hashlib.sha1(f'blob {len(raw)}\0'.encode()+raw).hexdigest())
++
++
++def check_dataset(dataset: Path,nf_root: Path) -> dict:
++    Reference,source=checked_reference(nf_root)
++    plan=json.loads((dataset/'batch_plan.json').read_text(encoding='utf-8'))
++    if plan.get('complete') is not True or not plan.get('records'):
++        raise ValueError('Incomplete or empty dataset')
++    results=[];root=dataset.resolve()
++    for entry in plan['records']:
++        path=(root/entry['path']).resolve()
++        if root not in path.parents or path.suffix=='.part':
++            raise ValueError('Unsafe/incomplete record path')
++        with Reference(path) as ref:
++            condition=np.array([entry['wavelength_nm'],-entry['ki'][1]])
++            if not np.allclose(ref.condition,condition,atol=2e-12,rtol=0):
++                raise AssertionError('Downstream conditioning differs')
++            mass,g=ref.mass_and_g()
++            if abs(mass-1)>1e-12 or abs(g-entry['g'])>5e-12:
++                raise AssertionError('Downstream mass/moment differs')
++            # Independent checks at every stored cell center, mapped to NF frame.
++            u=0.5*(ref.u_edges[:-1]+ref.u_edges[1:])
++            ph=-np.pi+2*np.pi*(np.arange(ref.n_phi)+.5)/ref.n_phi
++            radius=2*np.sqrt(u*(1-u))
++            x=radius[None,:]*np.cos(ph[:,None]);y=radius[None,:]*np.sin(ph[:,None])
++            z=np.broadcast_to(1-2*u,x.shape)
++            local=np.stack([x,y,z],axis=-1)
++            nf=local@ref.source_to_nf.T
++            actual=ref.log_prob(nf)
++            joint=np.diff(ref.phi_cdf)[:,None]*np.diff(ref.theta_cdf,axis=1)
++            density=joint/((4*np.pi/ref.n_phi)*np.diff(ref.u_edges))[None,:]
++            positive=density>0
++            if not np.array_equal(np.isfinite(actual),positive):
++                raise AssertionError('Downstream support mismatch (no floors)')
++            error=float(np.max(np.abs(actual[positive]-np.log(density[positive]))))
++            if error>2e-11:
++                raise AssertionError(f'Downstream density mismatch: {error}')
++            # Fixed interior quantiles, not a Monte Carlo transport calculation.
++            a=(np.arange(31)+.37)/31;b=(np.arange(29)+.61)/29
++            uu,vv=np.meshgrid(a,b,indexing='ij')
++            directions,log_pdf=ref.sample(np.stack([uu,vv],axis=-1))
++            if not np.isfinite(log_pdf).all() or not np.allclose(np.linalg.norm(directions,axis=-1),1,atol=3e-14,rtol=0):
++                raise AssertionError('Invalid NF direction samples')
++            if not np.array_equal(ref.log_prob(directions),log_pdf):
++                raise AssertionError('NF sample/eval PDF mismatch')
++            results.append(dict(path=entry['path'],condition=ref.condition.tolist(),mass=mass,g=g,
++                maximum_cell_center_log_pdf_error=error,sampled_directions=int(uu.size),
++                source_metadata_repository=ref.metadata.get('source_repository')))
++    return dict(complete=True,reference_module=source,records=results,
++        tested='reader + condition + exact cell PDF + deterministic CDF inversion; not NF training',
++        unchanged_input=True)
++
++
++def main():
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--dataset',type=Path,required=True);p.add_argument('--nf-root',type=Path,required=True)
++    p.add_argument('--out',type=Path)
++    args=p.parse_args()
++    try:
++        report=check_dataset(args.dataset,args.nf_root)
++        if args.out:
++            with args.out.open('x',encoding='utf-8') as f:json.dump(report,f,indent=2,ensure_ascii=True,allow_nan=False)
++        print(f"PASS RainbowReference: {len(report['records'])} records; reader blob={report['reference_module']['git_blob_sha1']}")
++    except Exception as e:
++        print('NF compatibility FAILED: '+ascii(str(e)),file=sys.stderr);raise SystemExit(2)
++
++if __name__=='__main__': main()
+diff --git a/hex_atlas/tools/run_spectrum.py b/hex_atlas/tools/run_spectrum.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..e3859eebd20be55f37482d2522e459f501a17202
+--- /dev/null
++++ b/hex_atlas/tools/run_spectrum.py
+@@ -0,0 +1,180 @@
++#!/usr/bin/env python3
++"""Fixed particle/ODF: spectral atlas generation followed by deterministic CDFs.
++
++No optical simplification, implicit downsampling, RNG, or CPU fallback. Completed
++atlases can be reused only with matching arguments and executable/module bytes.
++An unfinished .part is never adopted. Run --dry-run before a large job.
++"""
++from __future__ import annotations
++import argparse
++import hashlib
++import json
++import math
++from pathlib import Path
++import subprocess
++import sys
++import time
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / 'python'))
++from compose_atlas import incidents, run as compose, write_json
++from atlas_math import orientation_rule, sha256_file
++
++REQUIRED = {'radius_mm', 'length_mm', 'incident_theta_intervals',
++            'incident_phi_intervals', 'theta', 'phi', 'area_subdivisions',
++            'batch_rays', 'max_work_mib'}
++OPTIONAL = {'max_internal_hits', 'tail_tolerance', 'max_unresolved_fraction',
++            'max_balance_error'}
++INTEGER_KEYS = {'incident_theta_intervals', 'incident_phi_intervals', 'theta',
++                'phi', 'area_subdivisions', 'batch_rays', 'max_work_mib', 'max_internal_hits'}
++
++
++def read_plan(path: Path) -> dict:
++    with path.open(encoding='utf-8') as f:
++        plan = json.load(f)
++    if set(plan) != {'wavelengths_nm', 'precompute', 'composition'}:
++        raise ValueError('Plan requires only wavelengths_nm, precompute, composition')
++    settings = plan['precompute']
++    if not isinstance(settings, dict) or not REQUIRED <= set(settings) <= REQUIRED | OPTIONAL:
++        raise ValueError('Missing/unknown precompute parameter')
++    for k, v in settings.items():
++        if k in INTEGER_KEYS:
++            if type(v) is not int or v <= 0:
++                raise ValueError(f'{k} must be a positive integer')
++        elif type(v) not in (int, float) or not math.isfinite(v) or v < 0:
++            raise ValueError(f'{k} must be a finite nonnegative number')
++    if min(settings['radius_mm'], settings['length_mm']) <= 0:
++        raise ValueError('Particle dimensions must be positive')
++    waves = plan['wavelengths_nm']
++    if (not isinstance(waves, list) or not waves or
++            any(type(w) not in (int, float) or not math.isfinite(w) or not 200 <= w <= 1100 for w in waves) or
++            len(set(waves)) != len(waves)):
++        raise ValueError('Unique vacuum wavelengths in 200..1100 nm are required')
++    if sorted(waves) != waves:
++        raise ValueError('Wavelengths must be listed in increasing order (stable w-index)')
++    cfg = plan['composition']
++    if set(cfg) != {'inclinations_deg', 'orientation'}:
++        raise ValueError('This fixed-condition runner requires inclination angles and one orientation model')
++    directions = incidents(cfg)
++    if len(set(cfg['inclinations_deg'])) != len(directions):
++        raise ValueError('Duplicate incident conditions')
++    orientation_rule(cfg['orientation'])  # validate before any expensive job
++    work = 16 * settings['batch_rays'] * settings['theta'] * settings['phi']
++    if work > settings['max_work_mib'] * 1024**2:
++        raise ValueError('Per-ray GPU work buffer exceeds max_work_mib; reduce batch_rays explicitly')
++    return plan
++
++
++def name_of(wavelength: float) -> str:
++    return 'lambda_' + format(float(wavelength), '.17g').replace('.', 'p') + '_nm'
++
++
++def verify_atlas(path: Path, wave: float, settings: dict) -> dict:
++    if path.name.endswith('.part'):
++        raise ValueError('Incomplete atlas')
++    m = json.loads((path / 'metadata.json').read_text(encoding='utf-8'))
++    if m.get('complete') is not True or m.get('schema') != 'ice.single_particle_atlas.v1':
++        raise ValueError('Incomplete/unknown cached atlas')
++    mat = m['material']
++    if (mat.get('model') != 'ice_ih_warren_brandt_2008_real_only' or
++            mat.get('automatic_ice_dispersion') is not True or
++            mat.get('wavelength_nm') != wave or mat.get('exterior_index') != 1):
++        raise ValueError('Cached atlas is not the requested dispersive ice calculation')
++    expected = {'incident_theta_intervals': settings['incident_theta_intervals'],
++                'incident_phi_intervals': settings['incident_phi_intervals'],
++                'theta_count': settings['theta'], 'phi_count': settings['phi']}
++    if any(m.get(k) != v for k, v in expected.items()):
++        raise ValueError('Cached angular grid differs from request')
++    if (m['geometry']['circumradius_mm'] != settings['radius_mm'] or
++            m['geometry']['full_length_mm'] != settings['length_mm'] or
++            m['area_quadrature']['subdivisions'] != settings['area_subdivisions']):
++        raise ValueError('Cached geometry/area quadrature differs from request')
++    for filename in ('mass_mm2.npy', 'u_edges.npy'):
++        if not (path / filename).is_file():
++            raise ValueError('Missing cached atlas array')
++    # compose.Atlas subsequently verifies every node's actual mass/area/tail.
++    return m
++
++
++def run(exe: Path, plan_path: Path, atlas_root: Path, out: Path,
++        reuse: bool = False, dry_run: bool = False) -> None:
++    plan = read_plan(plan_path)
++    exe = exe.resolve()
++    if not exe.is_file():
++        raise ValueError('Precompute executable not found; build CPU or CUDA target explicitly')
++    if out.exists() or out.with_name(out.name + '.part').exists():
++        raise ValueError('Use a new CDF output directory; existing output/.part is never replaced')
++    s = plan['precompute']
++    raw = 8 * (s['incident_theta_intervals'] + 1) * (s['incident_phi_intervals'] + 1) * s['theta'] * s['phi']
++    print(f"PLAN: {len(plan['wavelengths_nm'])} wavelengths x {len(plan['composition']['inclinations_deg'])} incidents")
++    print(f"RAW ATLAS: {raw / 1024**3:.3f} GiB/wavelength; {raw * len(plan['wavelengths_nm']) / 1024**3:.3f} GiB total (plus headers/metadata/CDFs)")
++    print(f"GPU RAY HISTOGRAM: {16*s['batch_rays']*s['theta']*s['phi']/1024**2:.1f} MiB (additional buffers required)")
++    args = [item for key, value in sorted(s.items()) for item in ('--' + key.replace('_', '-'), str(value))]
++    paths = [atlas_root / name_of(w) for w in plan['wavelengths_nm']]
++    if dry_run:
++        for w, path in zip(plan['wavelengths_nm'], paths):
++            print(subprocess.list2cmdline([str(exe), '--material', 'ice', '--wavelength-nm', str(w), *args, '--out', str(path)]))
++        print('DRY RUN: no files were created and no data were generated')
++        return
++    build = {'executable_sha256': sha256_file(exe)}
++    module = exe.parent / 'modules/atlas_trace.fatbin'
++    if module.is_file():
++        build['adjacent_atlas_module_sha256'] = sha256_file(module)
++    atlas_root.mkdir(parents=True, exist_ok=True)
++    for index, (wave, path) in enumerate(zip(plan['wavelengths_nm'], paths)):
++        receipt = path.with_name(path.name + '.job.json')
++        expected = dict(schema='ice.spectral_atlas_job.v1', wavelength_nm=wave,
++                        precompute=s, material='ice', build=build)
++        if path.exists():
++            if not reuse:
++                raise FileExistsError('Atlas exists; use --reuse for validated matching jobs: ' + str(path))
++            old = json.loads(receipt.read_text(encoding='utf-8'))
++            if old.get('request') != expected or old.get('complete') is not True:
++                raise ValueError('Cached atlas arguments/build differ; use another atlas-root')
++            if old.get('metadata_sha256') != sha256_file(path / 'metadata.json'):
++                raise ValueError('Cached metadata changed since the recorded job')
++            verify_atlas(path, wave, s)
++            print(f'REUSE {index+1}/{len(paths)}: wavelength_nm={wave}')
++            continue
++        if receipt.exists() or path.with_name(path.name + '.part').exists():
++            raise FileExistsError('Unfinished job or stale receipt; inspect it before retrying: ' + str(path))
++        log_path = path.with_name(path.name + '.log')
++        command = [str(exe), '--material', 'ice', '--wavelength-nm', str(wave), *args, '--out', str(path)]
++        started = time.perf_counter()
++        with log_path.open('wb') as log:
++            result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
++        if result.returncode != 0:
++            raise RuntimeError(f'Precompute failed (exit={result.returncode}); log={log_path}; .part retained, no fallback')
++        verify_atlas(path, wave, s)
++        write_json(receipt, dict(complete=True, request=expected,
++                                metadata_sha256=sha256_file(path / 'metadata.json'),
++                                seconds=time.perf_counter()-started))
++        print(f'ATLAS {index+1}/{len(paths)}: wavelength_nm={wave}; seconds={time.perf_counter()-started:.3f}', flush=True)
++    payload = json.dumps(plan['composition'], sort_keys=True, ensure_ascii=True, allow_nan=False).encode('ascii')
++    cfg_path = atlas_root / ('composition_' + hashlib.sha256(payload).hexdigest() + '.json')
++    if cfg_path.exists():
++        if json.loads(cfg_path.read_text(encoding='utf-8')) != plan['composition']:
++            raise ValueError('Composition configuration cache mismatch')
++    else:
++        write_json(cfg_path, plan['composition'])
++    compose(paths, cfg_path, out, output_contract='rainbow')
++    print('COMPLETE: ' + ascii(str(out)) + '; check_nf_compatibility.py is the downstream acceptance test')
++
++
++def main() -> None:
++    p = argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--exe', type=Path, required=True)
++    p.add_argument('--plan', type=Path, required=True)
++    p.add_argument('--atlas-root', type=Path, required=True)
++    p.add_argument('--out', type=Path, required=True)
++    p.add_argument('--reuse', action='store_true')
++    p.add_argument('--dry-run', action='store_true')
++    a = p.parse_args()
++    try:
++        run(a.exe, a.plan, a.atlas_root, a.out, a.reuse, a.dry_run)
++    except Exception as e:
++        print('SPECTRAL GENERATION FAILED: ' + ascii(str(e)), file=sys.stderr)
++        raise SystemExit(2)
++
++if __name__ == '__main__':
++    main()

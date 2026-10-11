@@ -23,7 +23,7 @@ def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
 
 with tempfile.TemporaryDirectory(prefix='ice_atlas_cli_') as tmp:
     root=Path(tmp)
-    base=[exe,'--radius-mm','.1','--length-mm','.2','--ior','1.31',
+    base=[exe,'--radius-mm','.1','--length-mm','.2','--material','constant','--ior','1.31',
           '--incident-theta-intervals','3','--incident-phi-intervals','2',
           '--theta','12','--phi','24','--area-subdivisions','2']
     paths=[]
