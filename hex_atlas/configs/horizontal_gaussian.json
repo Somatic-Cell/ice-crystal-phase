@@ -1,0 +1,10 @@
+{
+  "inclinations_deg": [0, 15, 30, 45, 60, 75, 90],
+  "orientation": {
+    "quadrature": {"azimuth": 16, "tilt": 8, "spin": 12},
+    "components": [
+      {"kind": "horizontal_gaussian", "sigma_deg": 10, "fraction": 0.9},
+      {"kind": "isotropic", "fraction": 0.1}
+    ]
+  }
+}

@@ -1,0 +1,1868 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 0ae4d02..e0b6b8c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -178,3 +178,9 @@ option(ICE_BUILD_HEX_PHASE "Build hexagonal crystal orientation/CDF generation"
+ if(ICE_BUILD_HEX_PHASE)
+     add_subdirectory(hex_phase)
+ endif()
++
++# M3: reusable single-particle response atlas and deterministic orientation composition.
++option(ICE_BUILD_HEX_ATLAS "Build deterministic single-particle atlas tools" ON)
++if(ICE_BUILD_HEX_ATLAS)
++    add_subdirectory(hex_atlas)
++endif()
+diff --git a/hex_atlas/.gitignore b/hex_atlas/.gitignore
+new file mode 100644
+index 0000000..7a60b85
+--- /dev/null
++++ b/hex_atlas/.gitignore
+@@ -0,0 +1,2 @@
++__pycache__/
++*.pyc
+diff --git a/hex_atlas/CMakeLists.txt b/hex_atlas/CMakeLists.txt
+new file mode 100644
+index 0000000..0406118
+--- /dev/null
++++ b/hex_atlas/CMakeLists.txt
+@@ -0,0 +1,112 @@
++cmake_minimum_required(VERSION 3.27)
++if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
++    project(IceDeterministicAtlas LANGUAGES CXX)
++    include(CTest)
++    set(_atlas_cuda_default OFF)
++else()
++    set(_atlas_cuda_default ${ICE_HEX_ENABLE_CUDA})
++endif()
++option(ICE_ATLAS_ENABLE_CUDA "Build deterministic CUDA area-ray precomputation" ${_atlas_cuda_default})
++option(ICE_ATLAS_BUILD_TESTS "Build atlas and deterministic composition tests" ${BUILD_TESTING})
++set(ICE_ATLAS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
++get_filename_component(ICE_ATLAS_REPO "${ICE_ATLAS_ROOT}/.." ABSOLUTE)
++if(NOT TARGET ice_hex_trace_core)
++    if(NOT DEFINED ICE_HEX_ENABLE_CUDA)
++        set(ICE_HEX_ENABLE_CUDA ${ICE_ATLAS_ENABLE_CUDA} CACHE BOOL "M1 dependency CUDA")
++    endif()
++    add_subdirectory("${ICE_ATLAS_REPO}/hex_trace" "hex_trace_dependency")
++endif()
++function(ice_atlas_configure target)
++    target_compile_features(${target} PUBLIC cxx_std_20)
++    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
++    target_include_directories(${target} PUBLIC "${ICE_ATLAS_ROOT}/include"
++        "${ICE_ATLAS_REPO}/hex_trace/include" "${ICE_ATLAS_REPO}/hex_phase/include" "${ICE_ATLAS_REPO}/include")
++    if(WIN32)
++        target_compile_definitions(${target} PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
++    endif()
++    if(MSVC)
++        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:/utf-8;/W4;/Zc:__cplusplus;/fp:precise>")
++    else()
++        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic;-fno-fast-math;-ffp-contract=off>")
++    endif()
++endfunction()
++add_library(ice_atlas_core STATIC src/atlas.cpp "${ICE_ATLAS_REPO}/src/npy_writer.cpp")
++ice_atlas_configure(ice_atlas_core)
++target_link_libraries(ice_atlas_core PUBLIC ice_hex_trace_core)
++file(GLOB_RECURSE _atlas_sources CONFIGURE_DEPENDS "${ICE_ATLAS_ROOT}/include/*.hpp"
++    "${ICE_ATLAS_ROOT}/src/*.cpp" "${ICE_ATLAS_ROOT}/device/*.cu" "${ICE_ATLAS_ROOT}/apps/*.cpp"
++    "${ICE_ATLAS_REPO}/hex_trace/include/*.hpp")
++list(APPEND _atlas_sources "${ICE_ATLAS_ROOT}/CMakeLists.txt" "${ICE_ATLAS_REPO}/hex_trace/src/hex_trace.cpp"
++    "${ICE_ATLAS_REPO}/hex_phase/include/ice_crystal/phase_math.hpp" "${ICE_ATLAS_REPO}/src/npy_writer.cpp")
++list(SORT _atlas_sources)
++set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_atlas_sources})
++set(_atlas_hash_input "")
++foreach(_s IN LISTS _atlas_sources)
++    file(SHA256 "${_s}" _h)
++    file(RELATIVE_PATH _r "${ICE_ATLAS_REPO}" "${_s}")
++    string(APPEND _atlas_hash_input "${_r}:${_h}\n")
++endforeach()
++string(SHA256 _atlas_hash "${_atlas_hash_input}")
++add_executable(ice_precompute_atlas_cpu apps/precompute_atlas.cpp)
++ice_atlas_configure(ice_precompute_atlas_cpu)
++target_link_libraries(ice_precompute_atlas_cpu PRIVATE ice_atlas_core)
++target_compile_definitions(ice_precompute_atlas_cpu PRIVATE ICE_ATLAS_SOURCE_FINGERPRINT="${_atlas_hash}")
++if(ICE_ATLAS_ENABLE_CUDA)
++    if(NOT TARGET ice_hex_trace_cuda)
++        message(FATAL_ERROR "Atlas CUDA requires ICE_HEX_ENABLE_CUDA=ON. No CPU fallback.")
++    endif()
++    add_library(ice_atlas_cuda STATIC src/atlas_cuda.cpp)
++    ice_atlas_configure(ice_atlas_cuda)
++    target_link_libraries(ice_atlas_cuda PUBLIC ice_atlas_core ice_hex_trace_cuda)
++    add_library(ice_atlas_module OBJECT device/atlas_trace.cu)
++    target_include_directories(ice_atlas_module PRIVATE "${ICE_ATLAS_ROOT}/include"
++        "${ICE_ATLAS_REPO}/hex_trace/include" "${ICE_ATLAS_REPO}/hex_phase/include")
++    set_target_properties(ice_atlas_module PROPERTIES CUDA_STANDARD 20 CUDA_STANDARD_REQUIRED ON CUDA_EXTENSIONS OFF
++        CUDA_FATBIN_COMPILATION ON CUDA_SEPARABLE_COMPILATION OFF CUDA_RUNTIME_LIBRARY None)
++    target_compile_options(ice_atlas_module PRIVATE
++        "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--ftz=false;--prec-div=true;--prec-sqrt=true;--fmad=false>")
++    if(MSVC)
++        target_compile_options(ice_atlas_module PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/utf-8>)
++    endif()
++    function(ice_atlas_stage executable)
++        add_custom_target(${executable}_stage
++            COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:${executable}>/modules"
++            COMMAND "${CMAKE_COMMAND}" -E copy_if_different "$<TARGET_OBJECTS:ice_atlas_module>"
++                "$<TARGET_FILE_DIR:${executable}>/modules/atlas_trace.fatbin"
++            COMMAND_EXPAND_LISTS VERBATIM)
++        add_dependencies(${executable}_stage ice_atlas_module)
++        add_dependencies(${executable} ${executable}_stage)
++    endfunction()
++    add_executable(ice_precompute_atlas apps/precompute_atlas.cpp)
++    ice_atlas_configure(ice_precompute_atlas)
++    target_compile_definitions(ice_precompute_atlas PRIVATE ICE_ATLAS_HAS_CUDA=1 ICE_ATLAS_SOURCE_FINGERPRINT="${_atlas_hash}")
++    target_link_libraries(ice_precompute_atlas PRIVATE ice_atlas_cuda)
++    ice_atlas_stage(ice_precompute_atlas)
++endif()
++if(ICE_ATLAS_BUILD_TESTS)
++    enable_testing()
++    add_executable(ice_atlas_host_tests tests/atlas_tests.cpp)
++    ice_atlas_configure(ice_atlas_host_tests)
++    target_link_libraries(ice_atlas_host_tests PRIVATE ice_atlas_core)
++    add_test(NAME ice_atlas_host COMMAND ice_atlas_host_tests)
++    find_package(Python3 COMPONENTS Interpreter QUIET)
++    if(Python3_Interpreter_FOUND)
++        execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import numpy" RESULT_VARIABLE _atlas_numpy OUTPUT_QUIET ERROR_QUIET)
++        if(_atlas_numpy EQUAL 0)
++            add_test(NAME ice_atlas_python COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/test_compose.py")
++            add_test(NAME ice_atlas_cli COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/cli_test.py"
++                "$<TARGET_FILE:ice_precompute_atlas_cpu>" "${ICE_ATLAS_REPO}")
++        endif()
++    endif()
++    if(ICE_ATLAS_ENABLE_CUDA)
++        add_executable(ice_atlas_cuda_tests tests/atlas_cuda_tests.cpp)
++        ice_atlas_configure(ice_atlas_cuda_tests)
++        target_link_libraries(ice_atlas_cuda_tests PRIVATE ice_atlas_cuda)
++        ice_atlas_stage(ice_atlas_cuda_tests)
++        add_test(NAME ice_atlas_cuda COMMAND ice_atlas_cuda_tests)
++        if(Python3_Interpreter_FOUND AND _atlas_numpy EQUAL 0)
++            add_test(NAME ice_atlas_cuda_cli COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/cli_test.py"
++                "$<TARGET_FILE:ice_precompute_atlas>" "${ICE_ATLAS_REPO}")
++        endif()
++    endif()
++endif()
+diff --git a/hex_atlas/README.md b/hex_atlas/README.md
+new file mode 100644
+index 0000000..c3df9d0
+--- /dev/null
++++ b/hex_atlas/README.md
+@@ -0,0 +1,224 @@
++# M3: 固定入射応答の事前計算と決定論的な配向合成
++
++## この差分の範囲
++
++M1/M2/hotfix1 を変更せず、`hex_atlas/` とルート CMake の追加だけで実装する。
++基準リポジトリは `Somatic-Cell/ice-crystal-phase`、確認した main は
++`36477f4bed099b2c067f4cf57739dc4d1704b5f3`。
++
++- **事前計算:** CPU または CUDA。固定六角柱の入射方向別の非正規化セル光束を保存する。
++- **配向合成:** CPU/NumPy。既存応答の補間・対称変換・循環シフト・重み付き和のみ。
++  レイトレーサを呼ばず、配向モデルを変更して再利用できる。
++- **最終出力:** 各入射方向・波長に対する `rainbow.phase_cdf.numpy.v2` の4ファイル。
++- **ランダム性:** 新しい経路は、姿勢・入射位置・光路分岐のいずれにも乱数を使わない。
++  旧 M1/M2 の乱数サンプラーは削除せず、M3 からは呼ばない。
++- **GPU の加算:** floating atomicAdd を使わない。レイごとに分離したセル列を固定順で集約する。
++  異なる CPU/GPU/コンパイラ間でのビット一致までは主張しない。
++
++これは有限格子・数値求積モデルの実装であり、連続配向積分の閉形式解ではない。
++特に **入射方向間の補間** と **有限の姿勢求積点による積分誤差** は残る。
++CUDA カーネルと CPU/CUDA 比較テストを同梱するが、配布側環境には CUDA Toolkit と GPU がなく、
++CUDA のコンパイル・実行と Windows/MSVC は未検証。CPU の試験結果は別紙参照。
++
++## 1. 高価な計算と配向モデルを分離する
++
++```text
++六角柱 + 波長に対して評価済みの屈折率
++  -> 対称基本領域の固定入射格子
++  -> 固定面積求積 + M1 trace_from_entry
++  -> mass_mm2.npy (再利用する単粒子応答)
++
++単粒子応答 + 配向分布 + 複数の世界入射方向
++  -> 固定姿勢求積と既存応答の参照
++  -> phi 反転 / phi 循環シフトの重みを事前集約
++  -> 非負の直接畳み込み
++  -> 入射条件ごとに一度だけ正規化
++  -> metadata.json と3個の CDF/座標 NPY
++```
++
++単粒子応答は CDF ではない。出射セルへ入る断面積次元の光束を保持する。
++配向を変更しても単粒子の光路を再計算しない。形状・屈折率を変更する場合は事前計算をやり直す。
++現在は自動的な氷の分散モデルを含まない。`--ior` は指定波長で呼び出し側が与える実屈折率。
++波長だけ変更し同じ `--ior` を与えた場合、非分散の同一光学条件になる。
++
++## 2. 決定論的な入射位置と光路
++
++側面6枚を長方形、底面2枚を各6個の三角形に分ける。
++各面/三角形の面積一様な2次元パラメータ領域を S x S セルに分け、
++各セルに Gauss-Legendre 2 x 3 点を配置する。三角形は面積保存の sqrt マッピングを使う。
++各点の重みは対応する面の面積、投影余弦、セル面積、Gauss 重みの積。
++**面ごとの本数が同じでも光束を均等配分しない。** 投影面積を重みに含める。
++
++各正の投影面積を持つ領域を必ず被覆する。ヒット率推定や棄却法は使わない。
++入力面積重みの総和と解析的投影面積を照合する。
++
++光路は既存の `trace_from_entry()` による R, TT, TRT, TRRT, ... の決定論的分岐。
++二つの入力偏光に対する JonesFlux、全反射の相対位相、光束収支をそのまま使用する。
++辺・頂点の曖昧さ、上限到達、数値異常は失敗とする。乱数 jitter や黙った光路除去で回避しない。
++`--max-internal-hits` は今回の既定値2048、`--tail-tolerance` は1e-12。
++未回収光束は独立に保存し、正規化で隠さない。
++
++## 3. 対称領域と入射補間（重要）
++
++柱軸は body +y。入射極角 t はこの軸から測る。入射方位角 p は x-z 平面。
++事前計算の領域は t in [0,pi/2], p in [0,pi/6]。
++`--incident-theta-intervals 6 --incident-phi-intervals 3` は、端点を含む **7 x 4 = 28節点**。
++領域の立体角は全体の1/24。ただし端点重複があるため節点数の削減率が常に24倍になるわけではない。
++
++```text
++k(t,p)  = (sin(t)cos(p), cos(t), sin(t)sin(p))
++e0(t,p) = (cos(t)cos(p), -sin(t), cos(t)sin(p))
++e1       = cross(k,e0)
++```
++
++実際の相対入射 s=R^T ki を D6h の24個の直交対称操作で基本領域へ折り畳む。
++**O(3) の鏡映を含む。鏡映 Q を物理的姿勢 R in SO(3) と誤認しない。**
++鏡映では出射方位角の符号を反転する。姿勢 R と Q の合成からシフト量を求める。
++
++入射格子間では、上記局所フレームを同一視し、
++**投影面積で割った応答 M_a/A_a を t,p に関して双線形補間**する。
++これを、実際の照会方向 s で解析計算した A(s) で重み付けする。
++割るのは投影面積 A_a であり、回収済み光束 E_a ではない。
++したがって未回収比率は残り、同じ補間係数で未回収光束も伝播する。
++
++この補間は有限入力格子の明示的な数値モデルであり、光学応答が本当に双線形という仮定の証明ではない。
++ピーク位置や光路の切り替わりを格子間で厳密に復元できるわけではない。
++補間誤差の収束認定は行わないが、既知の入力範囲外への外挿や最寄り点への黙った置換もしない。
++
++出射 t_scatter は入射軸からの散乱角。回転しても変わらない。
++出射 phi は、鏡映/循環シフトだけで共通フレームへ移せる。
++非整数セルのシフトは区分一定セル同士の重なり幅によって質量を分配する。
++これはその有限セルモデルに対する保守的な再配置であり、画像補間/ガウシアンフィルタではない。
++FFT の負の丸め値や floor を避けるため、現在は非負の直接シフト和を使う。
++
++## 4. 配向モデルと数値積分
++
++Forster, Weber & Mayer (2025), **CrystalTrace**, Atmos. Meas. Tech. 18, 7853–7863,
++DOI: 10.5194/amt-18-7853-2025, Section 2, Step 2 の singly oriented columns 型を参照する。
++同論文の MC アルゴリズムを移植するのではなく、記載された Gaussian 傾斜モデルを決定論的に積分する。
++
++- `horizontal_gaussian`: body +y 軸の鉛直からの極角 beta が N(pi/2,sigma^2)。
++  密度は **d beta に対するもの**。物理的範囲 [0,pi] に明示的に切り詰めて正規化する。
++  追加の sin(beta) を掛けない。sigma=0 は厳密水平というデルタモデル。
++- `isotropic`: SO(3) 一様。cos(beta) に対する一様な固定求積を使う。
++- `fixed`: 明示的な unit quaternion [w,x,y,z] と個数比。
++
++R = Ry(alpha) Rz(beta) Ry(gamma)。alpha は [0,2pi) 一様。
++上の二つの連続モデルでは gamma は一様であり、六回対称性により [0,pi/3) に削減する。
++Parry 型の軸まわり拘束はこの実装に含めない。分布名を変えずに代用しない。
++
++Gaussian では CDF 上の等確率区間を固定し、その中央確率の逆 CDF を64回の決定論的二分法で求める。
++各 beta 区間の確率は定義上1/N_beta。alpha,gamma も等幅区間の中点で評価する。
++配向平均はこの固定テンソル積求積であり、乱数・seed は存在しない。
++少ない求積点で全ての細いピークが解像するという意味ではない。
++
++混合係数 `fraction` は **粒子個数比**。各照会方向/姿勢での投影面積を含めて光束を混合するため、
++散乱光束の混合比が fraction と同じになるとは限らない。総和1の正の比率を要求する。
++
++付属設定の sigma=10度、水平成分0.9などは動作確認用のパラメータであり、観測から推定した標準値ではない。
++
++## 5. ビルド
++
++CPU のみ（ルートではなく standalone）：
++
++```bat
++cmake -S hex_atlas -B build-atlas-host -DICE_ATLAS_ENABLE_CUDA=OFF -DICE_ATLAS_BUILD_TESTS=ON
++cmake --build build-atlas-host --config Release
++ctest --test-dir build-atlas-host -C Release --output-on-failure
++```
++
++ルートから CUDA 版を追加（既存 CUDA/OptiX/architecture 設定を維持）：
++
++```bat
++cmake -S . -B build -DICE_BUILD_HEX_ATLAS=ON -DICE_ATLAS_ENABLE_CUDA=ON -DICE_ATLAS_BUILD_TESTS=ON
++cmake --build build --config Release --target ice_precompute_atlas ice_precompute_atlas_cpu ice_atlas_host_tests ice_atlas_cuda_tests
++ctest --test-dir build -C Release -R "^ice_atlas_" --output-on-failure
++```
++
++NumPy が必要：`python -m pip install -r hex_atlas\python\requirements.txt`。
++NumPy を検出できない場合 Python/CLI テストは登録されないので `ctest -N` で確認する。
++新規の `ice_atlas_` は CPUでは3件、CUDAを有効にしたルートでは5件。
++Standalone の全 CTest には依存する M1 の2件も含まれる。
++
++## 6. 事前計算は一度だけ
++
++Visual Studio の出力配置の例：
++
++```bat
++.\build\hex_atlas\Release\ice_precompute_atlas.exe --out out\atlas_550 --radius-mm 0.1 --length-mm 0.2 --ior 1.31 --wavelength-nm 550 --incident-theta-intervals 6 --incident-phi-intervals 3 --theta 36 --phi 72 --area-subdivisions 2
++```
++
++CPU standalone の場合、実行ファイルを `build-atlas-host\Release\ice_precompute_atlas_cpu.exe` に置き換える。
++CMake の単一構成 generator では `Release\` を外す。
++
++- 外接円半径0.1 mm、全長0.2 mm。雨滴版の等体積球半径ではない。
++- n=1.31は指定された実屈折率。自動分散、吸収、複屈折、回折、経路間干渉は含まない。
++- 出射格子36 x 72、格納時の縮約/追加の平滑化なし。
++- これは低解像度の統合確認例で、収束済みGT設定ではない。
++- 追加メモリの中心は GPU per-ray histogram、16*batch_rays*Ntheta*Nphi バイト。
++  `--batch-rays 64`、`--max-work-mib 512` が既定。上限超過は拒否し、勝手に解像度を変更しない。
++
++中間出力：
++
++```text
++out/atlas_550/
++    metadata.json       # atlasの別schema、ノードの面積・残差・フレーム・監査
++    mass_mm2.npy        # [incident_theta,incident_phi,theta,phi], FP64
++    u_edges.npy
++```
++
++## 7. 複数入射条件へ合成
++
++```bat
++python hex_atlas\python\compose_atlas.py --atlas out\atlas_550 --config hex_atlas\configs\horizontal_gaussian.json --out out\deterministic_phase
++```
++
++この設定は入射傾斜 [0,15,30,45,60,75,90] 度の7条件。
++`ki=(cos(alpha),-sin(alpha),0)` という rainbow と同じ入射進行方向の規約を使う。
++config の `directions` に三次元ベクトルの列を与えることも可能（inclinations_deg と同時指定は拒否）。
++入射条件同士は平均しない。各条件内で姿勢を平均し、別々の CDF を作る。
++
++```text
++out/deterministic_phase/
++    batch_plan.json                # 完了したレコードのインデックスとハッシュ
++    generation_plan.json           # 開始時の計画（complete=false の計画スナップショット）
++    orientation_model.json
++    orientation_rotations.npy
++    orientation_weights.npy
++    records/i0000/w0000/
++        metadata.json
++        phi_cdf.npy
++        theta_given_phi_cdf.npy
++        u_edges.npy
++    records/i0001/w0000/ ...
++```
++
++1レコードの形式は既存互換。最上位 `batch_plan.json` の schema は M3 独自の明示的インデックス。
++NF 側が既存の一括生成 manifest の特定キーをハードコードしている場合、そのインデックス読み取りは別途対応が必要。
++`PhaseRecord` に渡すのは各 `records/iXXXX/wXXXX`。単粒子atlasディレクトリではない。
++
++配向幅を3度へ変更して再利用：
++
++```bat
++python hex_atlas\python\compose_atlas.py --atlas out\atlas_550 --config hex_atlas\configs\horizontal_gaussian_narrow.json --out out\deterministic_phase_narrow
++```
++
++ここには事前計算実行ファイルへの呼び出しがない。光路を再追跡しない。
++複数波長は、各波長の評価済み屈折率でatlasを作り、
++`--atlas out\atlas_550 out\atlas_650` のように渡す。同じ形状/格子を要求し、
++1個の配向結合重みを波長間でも再利用する。波長を黙って補間しない。
++
++## 8. 保存・監査・限界
++
++出射セルは立体角密度一定。phi周辺CDF、theta|phi条件付きCDFは FP64 の順序付き走査で構築する。
++CDF復元質量の L1 と lost-mass を監査し、陰に補修しない。HG g は保存CDFのセル平均余弦から求める。
++合成器は NumPy CPU 実装を使い、既存GPU `PhaseCdf` を実行する方式ではない。
++その代わり、既存の **無変更 reader** との end-to-end 回帰テストを含める。
++
++前方デルタ状成分は除去しない。有限極冠セルでの表現であり、物理的回折とは区別する。
++未回収光束も既存応答と同じ入射補間で混合し、総光束の監査を通してから正規化する。
++全ての出力は `.part` に生成し、完了時だけ確定する。既存出力の上書き/自動再開/失敗のskipは実装しない。
++途中失敗の `.part` は勝手に削除しない。
++
++入力格子補間、入射面積求積、姿勢積分、有限出射セル、幾何光学モデルの誤差は別である。
++`complete=true` は全レコードの生成/数値監査完了のみを意味し、物理GT認定ではない。
+diff --git a/hex_atlas/apps/precompute_atlas.cpp b/hex_atlas/apps/precompute_atlas.cpp
+new file mode 100644
+index 0000000..5500ee2
+--- /dev/null
++++ b/hex_atlas/apps/precompute_atlas.cpp
+@@ -0,0 +1,158 @@
++#include <ice_crystal/atlas.hpp>
++#include <rainbow/npy_writer.hpp>
++#if defined(ICE_ATLAS_HAS_CUDA)
++#include <ice_crystal/atlas_cuda.hpp>
++#endif
++#include <array>
++#include <charconv>
++#include <fstream>
++#include <iomanip>
++#include <iostream>
++#include <locale>
++#include <set>
++#include <stdexcept>
++#include <string>
++#ifndef ICE_ATLAS_SOURCE_FINGERPRINT
++#define ICE_ATLAS_SOURCE_FINGERPRINT "unknown"
++#endif
++namespace
++{
++using namespace iceCrystal;
++struct Options {atlas::Settings s;std::filesystem::path out,modules;int device=0;};
++double real(std::string_view v)
++{
++    double x=0;const auto r=std::from_chars(v.data(),v.data()+v.size(),x);
++    if(r.ec!=std::errc{}||r.ptr!=v.data()+v.size()||!finite_value(x))throw std::invalid_argument("Invalid finite number.");
++    return x;
++}
++std::uint32_t integer(std::string_view v)
++{
++    std::uint32_t x=0;const auto r=std::from_chars(v.data(),v.data()+v.size(),x);
++    if(r.ec!=std::errc{}||r.ptr!=v.data()+v.size())throw std::invalid_argument("Invalid integer.");
++    return x;
++}
++std::filesystem::path utf8_path(std::string_view s)
++{
++    return std::filesystem::path(std::u8string_view(reinterpret_cast<const char8_t*>(s.data()),s.size()));
++}
++Options parse(int argc,char** argv)
++{
++    Options o;o.modules=std::filesystem::absolute(utf8_path(argv[0])).parent_path()/"modules";
++    std::set<std::string> seen;
++    for(int i=1;i<argc;++i)
++    {
++        const std::string key=argv[i];
++        if(!seen.insert(key).second||i+1>=argc)throw std::invalid_argument("Duplicate option or missing argument.");
++        const std::string value=argv[++i];auto& s=o.s;
++        if(key=="--out")o.out=utf8_path(value);
++        else if(key=="--modules")o.modules=utf8_path(value);
++        else if(key=="--device") {const auto v=integer(value);if(v>2147483647u)throw std::invalid_argument("Device range.");o.device=int(v);}
++        else if(key=="--radius-mm")s.prism.circumradius_mm=real(value);
++        else if(key=="--length-mm")s.prism.length_mm=real(value);
++        else if(key=="--ior")s.interior_index=real(value);
++        else if(key=="--exterior-ior")s.exterior_index=real(value);
++        else if(key=="--wavelength-nm")s.wavelength_nm=real(value);
++        else if(key=="--incident-theta-intervals")s.incident_theta_intervals=integer(value);
++        else if(key=="--incident-phi-intervals")s.incident_phi_intervals=integer(value);
++        else if(key=="--theta")s.theta_count=integer(value);
++        else if(key=="--phi")s.phi_count=integer(value);
++        else if(key=="--area-subdivisions")s.area_subdivisions=integer(value);
++        else if(key=="--batch-rays")s.batch_rays=integer(value);
++        else if(key=="--max-work-mib")s.max_work_bytes=std::size_t(integer(value))*1024*1024;
++        else if(key=="--max-internal-hits")s.max_internal_hits=integer(value);
++        else if(key=="--tail-tolerance")s.tail_tolerance=real(value);
++        else if(key=="--max-unresolved-fraction")s.max_unresolved_fraction=real(value);
++        else if(key=="--max-balance-error")s.max_balance_error=real(value);
++        else throw std::invalid_argument("Unknown option: "+key);
++    }
++#if !defined(ICE_ATLAS_HAS_CUDA)
++    if(seen.count("--device")||seen.count("--modules"))throw std::invalid_argument("CPU binary does not accept CUDA settings.");
++#endif
++    if(o.out.empty())throw std::invalid_argument("--out required.");
++    atlas::validate(o.s);return o;
++}
++void vec(std::ostream& o,Vec3 v){o<<'['<<v.x<<','<<v.y<<','<<v.z<<']';}
++int run(int argc,char** argv)
++{
++    if(argc==2&&std::string_view(argv[1])=="--help")
++    {
++        std::cout<<"ice_precompute_atlas[_cpu] --out DIR --radius-mm R --length-mm L --ior N --wavelength-nm NM\n"
++          " --incident-theta-intervals T --incident-phi-intervals P --theta NT --phi NP --area-subdivisions S\n"
++          " [--max-internal-hits 2048 --tail-tolerance 1e-12 --batch-rays 64 --max-work-mib 512]\n"
++          " [--max-unresolved-fraction 1e-10 --max-balance-error 1e-10 --exterior-ior 1]\n"
++          "CUDA only: [--modules DIR --device 0]. No random seeds, smoothing, or CPU fallback.\n";return 0;
++    }
++    const auto o=parse(argc,argv);const auto& s=o.s;rainbow::DatasetDirectory directory(o.out);
++    try
++    {
++#if defined(ICE_ATLAS_HAS_CUDA)
++        rainbow::CudaContext context(o.device);atlas::CudaTracer tracer(context,o.modules/"atlas_trace.fatbin");
++        constexpr const char* backend="cuda_ordered_per_ray_histogram";
++#else
++        constexpr const char* backend="cpu_ordered_per_ray_histogram";
++#endif
++        const std::uint64_t ni=std::uint64_t(s.incident_theta_intervals)+1,nj=std::uint64_t(s.incident_phi_intervals)+1;
++        const std::array<std::uint64_t,4> shape{ni,nj,s.theta_count,s.phi_count};
++        rainbow::NpyFloat64Writer mass(directory.staging()/"mass_mm2.npy",shape);
++        std::ofstream meta(directory.staging()/"metadata.json",std::ios::binary|std::ios::trunc);
++        meta.exceptions(std::ios::badbit|std::ios::failbit);meta.imbue(std::locale::classic());meta<<std::setprecision(17);
++        meta<<"{\n\"schema\":\"ice.single_particle_atlas.v1\",\"complete\":true,\"backend\":\""<<backend<<"\",\n"
++          <<"\"source_fingerprint_at_configure\":\""<<ICE_ATLAS_SOURCE_FINGERPRINT<<"\",\n"
++          <<"\"dtype\":\"<f8\",\"order\":\"C\",\"mass_axes\":[\"incident_theta\",\"incident_phi\",\"theta\",\"phi\"],\n"
++          <<"\"incident_theta_intervals\":"<<s.incident_theta_intervals<<",\"incident_phi_intervals\":"<<s.incident_phi_intervals<<",\n"
++          <<"\"theta_count\":"<<s.theta_count<<",\"phi_count\":"<<s.phi_count<<",\n"
++          <<"\"geometry\":{\"shape\":\"regular_hexagonal_prism\",\"circumradius_mm\":"<<s.prism.circumradius_mm
++          <<",\"full_length_mm\":"<<s.prism.length_mm<<",\"body_long_axis\":[0,1,0]},\n"
++          <<"\"material\":{\"model\":\"caller_supplied_real_index_at_wavelength\",\"interior_index\":"<<s.interior_index
++          <<",\"exterior_index\":"<<s.exterior_index<<",\"wavelength_nm\":"<<s.wavelength_nm
++          <<",\"automatic_ice_dispersion\":false,\"absorption\":false,\"birefringence\":false},\n"
++          <<"\"symmetry\":\"D6h_O3_full_24_scalar_unpolarized\",\n"
++          <<"\"incident_reconstruction\":\"bilinear_theta_phi_in_spherical_incident_frame\",\n"
++          <<"\"incident_formula\":\"k=(sin(t)cos(p),cos(t),sin(t)sin(p));e0=(cos(t)cos(p),-sin(t),cos(t)sin(p));e1=k_cross_e0\",\n"
++          <<"\"area_quadrature\":{\"rule\":\"composite_equal_area_GL2xGL3\",\"subdivisions\":"<<s.area_subdivisions<<",\"randomness\":false},\n"
++          <<"\"transport\":{\"path_rule\":\"R_and_T_R_power_m_T\",\"polarization\":\"two_input_JonesFlux\",\"interference\":false,\"diffraction\":false,\n"
++          <<"\"tail_tolerance\":"<<s.tail_tolerance<<",\"max_internal_hits\":"<<s.max_internal_hits
++          <<",\"max_unresolved_fraction\":"<<s.max_unresolved_fraction<<",\"max_balance_error\":"<<s.max_balance_error<<"},\n"
++          <<"\"pole_policy\":\"axis_mass_uniform_in_azimuth_in_histogram_end_cap\",\n\"nodes\":[\n";
++        bool first=true;std::uint64_t total_rays=0;
++        for(std::uint32_t i=0;i<ni;++i)for(std::uint32_t j=0;j<nj;++j)
++        {
++            const auto n=atlas::make_node(s,i,j);
++#if defined(ICE_ATLAS_HAS_CUDA)
++            const auto r=tracer.trace(s,n);
++#else
++            const auto r=atlas::trace_cpu(s,n);
++#endif
++            mass.append(r.mass_mm2);total_rays+=r.audit.rays;
++            if(first)
++            {
++                const std::array<std::uint64_t,1> es{std::uint64_t(n.u_edges.size())};
++                rainbow::NpyFloat64Writer edges(directory.staging()/"u_edges.npy",es);edges.append(n.u_edges);edges.finish();
++            }
++            if(!first)meta<<",\n";
++            first=false;
++            meta<<"{\"i\":"<<i<<",\"j\":"<<j<<",\"theta\":"<<n.theta<<",\"phi\":"<<n.phi<<",\"ki\":";
++            vec(meta,n.trace.incident_direction);meta<<",\"e0\":";vec(meta,n.grid.frame.e0);
++            meta<<",\"projected_area_mm2\":"<<r.projected_area_mm2<<",\"escaped_mm2\":"<<r.escaped_mm2
++              <<",\"unresolved_mm2\":"<<r.unresolved_mm2<<",\"histogram_relative_error\":"<<r.histogram_relative_error
++              <<",\"rays\":"<<r.audit.rays<<",\"outputs\":"<<r.audit.outputs
++              <<",\"max_balance_error\":"<<r.audit.maximum_balance_error
++              <<",\"max_interface_balance_error\":"<<r.audit.maximum_interface_balance_error<<"}";
++            std::cout<<"atlas_node="<<i<<','<<j<<" rays="<<r.audit.rays<<" residual="<<r.unresolved_mm2/r.projected_area_mm2<<'\n';
++        }
++        mass.finish();meta<<"],\n\"total_rays\":"<<total_rays<<",\"numerical_convergence_certified\":false\n}\n";meta.close();
++        directory.commit();std::cout<<"atlas_complete nodes="<<ni*nj<<" rays="<<total_rays<<'\n';return 0;
++    }
++    catch(...){std::cerr<<"Atlas generation failed. Incomplete .part retained; no ray omission or fallback.\n";throw;}
++}
++int safe_run(int argc,char** argv){try{return run(argc,argv);}catch(const std::exception& e){std::cerr<<"ice_precompute_atlas: "<<e.what()<<'\n';return 2;}}
++}
++#if defined(_WIN32)
++int wmain(int argc,wchar_t** argv)
++{
++    std::vector<std::string> strings;for(int i=0;i<argc;++i){auto u=std::filesystem::path(argv[i]).u8string();strings.emplace_back(reinterpret_cast<const char*>(u.data()),u.size());}
++    std::vector<char*> args;for(auto& s:strings)args.push_back(s.data());return safe_run(argc,args.data());
++}
++#else
++int main(int argc,char** argv){return safe_run(argc,argv);}
++#endif
+diff --git a/hex_atlas/configs/horizontal_gaussian.json b/hex_atlas/configs/horizontal_gaussian.json
+new file mode 100644
+index 0000000..c76131c
+--- /dev/null
++++ b/hex_atlas/configs/horizontal_gaussian.json
+@@ -0,0 +1,10 @@
++{
++  "inclinations_deg": [0, 15, 30, 45, 60, 75, 90],
++  "orientation": {
++    "quadrature": {"azimuth": 16, "tilt": 8, "spin": 12},
++    "components": [
++      {"kind": "horizontal_gaussian", "sigma_deg": 10, "fraction": 0.9},
++      {"kind": "isotropic", "fraction": 0.1}
++    ]
++  }
++}
+diff --git a/hex_atlas/configs/horizontal_gaussian_narrow.json b/hex_atlas/configs/horizontal_gaussian_narrow.json
+new file mode 100644
+index 0000000..4154b9a
+--- /dev/null
++++ b/hex_atlas/configs/horizontal_gaussian_narrow.json
+@@ -0,0 +1,29 @@
++{
++  "inclinations_deg": [
++    0,
++    15,
++    30,
++    45,
++    60,
++    75,
++    90
++  ],
++  "orientation": {
++    "quadrature": {
++      "azimuth": 16,
++      "tilt": 8,
++      "spin": 12
++    },
++    "components": [
++      {
++        "kind": "horizontal_gaussian",
++        "sigma_deg": 3,
++        "fraction": 0.9
++      },
++      {
++        "kind": "isotropic",
++        "fraction": 0.1
++      }
++    ]
++  }
++}
+diff --git a/hex_atlas/device/atlas_trace.cu b/hex_atlas/device/atlas_trace.cu
+new file mode 100644
+index 0000000..1d9d7e2
+--- /dev/null
++++ b/hex_atlas/device/atlas_trace.cu
+@@ -0,0 +1,23 @@
++#include <ice_crystal/atlas.hpp>
++extern "C" __global__ void ice_atlas_abi_m3_v1() {}
++extern "C" __global__ void atlas_trace_area(iceCrystal::atlas::BatchParams p)
++{
++    const auto i=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
++    if(i>=p.count)return;
++    const auto q=p.rays[i];
++    iceCrystal::atlas::MassSink sink{p.grid,p.mass,p.count,i,q.projected_weight_mm2};
++    p.audits[i]=iceCrystal::trace_from_entry(p.trace,p.first+i,q.entry,sink);
++}
++extern "C" __global__ void atlas_reduce_ordered(const iceCrystal::Sum* partial,
++    iceCrystal::Sum* total,std::uint64_t cells,std::uint64_t count)
++{
++    const auto bin=std::uint64_t(blockIdx.x)*blockDim.x+threadIdx.x;
++    if(bin>=cells)return;
++    auto sum=total[bin];
++    for(std::uint64_t i=0;i<count;++i)
++    {
++        const double w=partial[bin*count+i].value;
++        if(w>0)sum.add(w);
++    }
++    total[bin]=sum;
++}
+diff --git a/hex_atlas/include/ice_crystal/atlas.hpp b/hex_atlas/include/ice_crystal/atlas.hpp
+new file mode 100644
+index 0000000..89ca9f1
+--- /dev/null
++++ b/hex_atlas/include/ice_crystal/atlas.hpp
+@@ -0,0 +1,88 @@
++#pragma once
++#include <ice_crystal/hex_trace.hpp>
++#include <ice_crystal/phase_math.hpp>
++#include <cstddef>
++#include <filesystem>
++#include <span>
++#include <vector>
++
++namespace iceCrystal::atlas
++{
++struct AreaRay
++{
++    EntrySample entry{};
++    double projected_weight_mm2=0;
++};
++// Tensor Gauss-Legendre (2 x 3) in each equal-area parameter cell. No RNG.
++std::vector<AreaRay> make_area_rule(const HexPrism&,Vec3 ki,std::uint32_t subdivisions);
++struct Settings
++{
++    HexPrism prism{};
++    double interior_index=0,exterior_index=1,wavelength_nm=0;
++    std::uint32_t incident_theta_intervals=0,incident_phi_intervals=0;
++    std::uint32_t theta_count=0,phi_count=0,area_subdivisions=0,max_internal_hits=2048;
++    std::size_t batch_rays=64,max_work_bytes=512ull*1024*1024;
++    double tail_tolerance=1e-12,max_unresolved_fraction=1e-10,max_balance_error=1e-10;
++};
++struct Node
++{
++    double theta=0,phi=0;
++    TraceSettings trace{};
++    std::vector<AreaRay> area_rays;
++    std::vector<double> u_edges;
++    PhaseGridView grid{};
++    // Rebind grid.u_edges after a move/copy; consumers use view(), not grid.u_edges.
++    PhaseGridView view() const noexcept {auto v=grid;v.u_edges=u_edges.data();return v;}
++};
++Node make_node(const Settings&,std::uint32_t theta_index,std::uint32_t phi_index);
++void validate(const Settings&);
++void validate_node(const Settings&,const Node&);
++struct Result
++{
++    std::vector<double> mass_mm2;
++    TraceSummary audit{};
++    double projected_area_mm2=0,escaped_mm2=0,unresolved_mm2=0;
++    double histogram_relative_error=0;
++    Sum escaped_accumulator{},unresolved_accumulator{};
++};
++Result trace_cpu(const Settings&,const Node&);
++// CPU and CUDA call the identical audit code on per-ray accounting.
++void add_audits(Result&,std::span<const RayAudit>,std::span<const AreaRay>,double tolerance);
++void finish(Result&,const Settings&,const Node&);
++
++struct MassSink
++{
++    PhaseGridView grid{};
++    Sum* mass=nullptr; // bin-major, ray-local columns
++    std::uint64_t stride=1,column=0;
++    double weight=0;
++    ICE_HD bool add(std::uint64_t bin,double w) noexcept
++    {
++        if(!(w>0)||!finite_value(w))return false;
++        mass[bin*stride+column].add(w);
++        return finite_value(mass[bin*stride+column].value);
++    }
++    ICE_HD bool push(const OutgoingSample& s) noexcept
++    {
++        const auto b=phase_bin(grid,s.direction);
++        const double w=weight*s.power_fraction;
++        if(!b.valid||!(w>0)||!finite_value(w))return false;
++        if(!b.pole)return add(b.index,w);
++        const auto row=b.pole>0?0:grid.nt-1;
++        for(std::uint32_t j=0;j<grid.np;++j)
++            if(!add(std::uint64_t(row)*grid.np+j,w/grid.np))return false;
++        return true;
++    }
++};
++struct BatchParams
++{
++    TraceSettings trace{};
++    PhaseGridView grid{};
++    const AreaRay* rays=nullptr;
++    Sum* mass=nullptr;
++    RayAudit* audits=nullptr;
++    std::uint64_t first=0,count=0;
++};
++static_assert(std::is_trivially_copyable_v<AreaRay>);
++static_assert(std::is_trivially_copyable_v<BatchParams>);
++}
+diff --git a/hex_atlas/include/ice_crystal/atlas_cuda.hpp b/hex_atlas/include/ice_crystal/atlas_cuda.hpp
+new file mode 100644
+index 0000000..bb75609
+--- /dev/null
++++ b/hex_atlas/include/ice_crystal/atlas_cuda.hpp
+@@ -0,0 +1,27 @@
++#pragma once
++#include <ice_crystal/atlas.hpp>
++#include <rainbow/cuda_module.hpp>
++#include <rainbow/device_buffer.hpp>
++namespace iceCrystal::atlas
++{
++// Fixed per-ray columns + one writer per output bin: no floating atomicAdd.
++class CudaTracer final
++{
++public:
++    CudaTracer(const rainbow::CudaContext&,const std::filesystem::path& module);
++    ~CudaTracer() noexcept;
++    CudaTracer(const CudaTracer&)=delete;
++    CudaTracer& operator=(const CudaTracer&)=delete;
++    Result trace(const Settings&,const Node&);
++private:
++    void sync();
++    void launch(const char*,void**,unsigned);
++    const rainbow::CudaContext& context_;
++    rainbow::CudaModule module_;
++    rainbow::DeviceBuffer<AreaRay> rays_;
++    rainbow::DeviceBuffer<RayAudit> audits_;
++    rainbow::DeviceBuffer<Sum> partial_,mass_;
++    rainbow::DeviceBuffer<double> edges_;
++    bool pending_=false;
++};
++}
+diff --git a/hex_atlas/python/atlas_math.py b/hex_atlas/python/atlas_math.py
+new file mode 100644
+index 0000000..e205778
+--- /dev/null
++++ b/hex_atlas/python/atlas_math.py
+@@ -0,0 +1,367 @@
++"""Deterministic finite-table orientation composition; no random-number calls.
++
++The optical interpolation is an explicit numerical model, not an analytic
++Maxwell solution: A-normalized response is bilinear in canonical incident
++(theta, phi), with local spherical frames identified. Reorientation is an
++exact reflection/shift of that reconstructed piecewise-constant cell density.
++"""
++from __future__ import annotations
++import hashlib
++import json
++import math
++from pathlib import Path
++from typing import Any
++import numpy as np
++
++PI = math.pi
++EPS = np.finfo(np.float64).eps
++
++
++def positive_int(x: Any, name: str, maximum: int = 1_000_000) -> int:
++    if type(x) is not int or not 1 <= x <= maximum:
++        raise ValueError(f"{name} must be an integer in [1,{maximum}]")
++    return x
++
++
++def sha256_file(path: Path) -> str:
++    h = hashlib.sha256()
++    with path.open('rb') as f:
++        for block in iter(lambda: f.read(1 << 20), b''):
++            h.update(block)
++    return h.hexdigest()
++
++
++def unit(v: Any) -> np.ndarray:
++    a = np.asarray(v, dtype=np.float64)
++    if a.shape != (3,) or not np.isfinite(a).all() or np.max(np.abs(a)) == 0:
++        raise ValueError('Expected finite nonzero three-vector')
++    a = a / np.max(np.abs(a))
++    return a / np.linalg.norm(a)
++
++
++def frame(ki: Any) -> np.ndarray:
++    """Right-handed [e0 e1 ki]; match M1's least-aligned-axis convention."""
++    k = unit(ki)
++    ref = np.eye(3)[int(np.argmin(np.abs(k)))]
++    e0 = unit(ref - k*np.dot(k, ref))
++    return np.column_stack((e0, unit(np.cross(k, e0)), k))
++
++
++def ry(a: float) -> np.ndarray:
++    c, s = math.cos(a), math.sin(a)
++    return np.array([[c, 0., s], [0., 1., 0.], [-s, 0., c]])
++
++
++def rz(a: float) -> np.ndarray:
++    c, s = math.cos(a), math.sin(a)
++    return np.array([[c, -s, 0.], [s, c, 0.], [0., 0., 1.]])
++
++
++def quaternion_matrix(q: Any) -> np.ndarray:
++    q = np.asarray(q, dtype=np.float64)
++    if q.shape != (4,) or not np.isfinite(q).all() or abs(float(q@q)-1) > 2e-12:
++        raise ValueError('Fixed quaternion must be unit wxyz')
++    w, x, y, z = q/np.linalg.norm(q)
++    return np.array([[1-2*(y*y+z*z), 2*(x*y-w*z), 2*(x*z+w*y)],
++                     [2*(x*y+w*z), 1-2*(x*x+z*z), 2*(y*z-w*x)],
++                     [2*(x*z-w*y), 2*(y*z+w*x), 1-2*(x*x+y*y)]])
++
++
++def gaussian_tilt_nodes(count: int, sigma_deg: float) -> np.ndarray:
++    """Quantile-midpoint quadrature of truncated N(pi/2,sigma^2), d beta.
++
++    Each probability stratum has exactly 1/count mass (erf-CDF definition).
++    This is fixed quadrature; inverse CDF is computed by deterministic bisection.
++    The density is NOT multiplied by sin(beta). sigma=0 is an explicit delta.
++    """
++    positive_int(count, 'tilt count')
++    sigma = math.radians(float(sigma_deg))
++    if not math.isfinite(sigma) or sigma < 0:
++        raise ValueError('sigma_deg must be finite and nonnegative')
++    if sigma == 0:
++        return np.full(count, PI/2)
++    bound = PI/(2*math.sqrt(2)*sigma)
++    e = math.erf(bound)
++    if not e > 0:
++        raise ValueError('Gaussian normalization is not representable')
++    values = []
++    for i in range(count):
++        target = 2*((i+.5)/count)-1
++        lo, hi = 0., PI
++        for _ in range(64):
++            mid = (lo+hi)/2
++            c = math.erf((mid-PI/2)/(math.sqrt(2)*sigma))/e
++            if c < target:
++                lo = mid
++            else:
++                hi = mid
++        values.append((lo+hi)/2)
++    result = np.asarray(values)
++    if count > 1 and np.any(np.diff(result) <= 0):
++        raise ValueError('Positive Gaussian width is below angular resolution; use explicit sigma_deg=0 for a delta')
++    return result
++
++
++def orientation_rule(config: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
++    """Fixed rotations and NUMBER weights. Each component's fraction is preserved.
++
++    Body +y axis; R=Ry(alpha) Rz(beta) Ry(gamma). alpha in [0,2pi),
++    gamma in [0,pi/3) for uniform spin of a regular hexagonal prism. The latter
++    is an exact quotient for uniform spin, not an assumption about Parry ice.
++    """
++    if set(config) != {'quadrature', 'components'}:
++        raise ValueError('orientation keys must be quadrature and components')
++    q = config['quadrature']
++    if set(q) != {'azimuth', 'tilt', 'spin'}:
++        raise ValueError('quadrature keys must be azimuth, tilt, spin')
++    na, nb, ng = [positive_int(q[k], k, 4096) for k in ('azimuth', 'tilt', 'spin')]
++    components = config['components']
++    if not isinstance(components, list) or not components:
++        raise ValueError('Nonempty orientation components required')
++    fractions = [float(c['fraction']) for c in components]
++    if any(not math.isfinite(f) or not 0 < f <= 1 for f in fractions) or abs(math.fsum(fractions)-1) > 1e-12:
++        raise ValueError('Positive NUMBER fractions must sum to one')
++    matrices, weights = [], []
++    component_counts = []
++    for c, fraction in zip(components, fractions):
++        kind = c['kind']
++        expected = {'kind', 'fraction'} | ({'sigma_deg'} if kind == 'horizontal_gaussian' else {'quaternion_wxyz'} if kind == 'fixed' else set())
++        if set(c) != expected:
++            raise ValueError(f'Unknown/missing component keys for {kind}')
++        if kind == 'fixed':
++            matrices.append(quaternion_matrix(c['quaternion_wxyz'])); weights.append(fraction)
++            component_counts.append(1)
++            continue
++        if kind == 'isotropic':
++            betas = np.arccos(1-2*(np.arange(nb)+.5)/nb)
++        elif kind == 'horizontal_gaussian':
++            betas = gaussian_tilt_nodes(nb, c['sigma_deg'])
++        else:
++            raise ValueError('Supported models: isotropic, horizontal_gaussian, fixed')
++        if na*nb*ng > 2_000_000:
++            raise ValueError('Too many explicit quadrature nodes')
++        for ia in range(na):
++            left = ry(2*PI*(ia+.5)/na)
++            for beta in betas:
++                tilted = left @ rz(float(beta))
++                for ig in range(ng):
++                    matrices.append(tilted @ ry((PI/3)*(ig+.5)/ng))
++                    weights.append(fraction/(na*nb*ng))
++        component_counts.append(na*nb*ng)
++    r, w = np.asarray(matrices), np.asarray(weights)
++    validate_rotations(r, w)
++    return r, w, {'kind': 'deterministic_probability_midpoint_product_quadrature',
++                  'config': config, 'component_nodes': component_counts,
++                  'rotation': 'Ry(alpha)_Rz(beta)_Ry(gamma)_body_to_ensemble',
++                  'horizontal_density_measure': 'd_beta; truncated normal on [0,pi]',
++                  'uniform_spin_range': [0, PI/3], 'randomness': False,
++                  'cdf_weights_analytic': True, 'optical_integral_analytic': False}
++
++
++def validate_rotations(r: np.ndarray, w: np.ndarray) -> None:
++    if r.ndim != 3 or r.shape[1:] != (3, 3) or w.shape != (len(r),) or len(r) == 0:
++        raise ValueError('Malformed orientation quadrature')
++    if not np.isfinite(r).all() or not np.isfinite(w).all() or np.any(w <= 0) or abs(math.fsum(w)-1) > 2e-12:
++        raise ValueError('Nonfinite / nonpositive / unnormalized orientation weights')
++    if not np.allclose(np.swapaxes(r, 1, 2) @ r, np.eye(3), rtol=0, atol=2e-12) or not np.allclose(np.linalg.det(r), 1, rtol=0, atol=2e-12):
++        raise ValueError('Orientation nodes must be proper orthogonal rotations')
++
++
++def canonical_frame(theta: float, phi: float) -> np.ndarray:
++    st, ct, sp, cp = math.sin(theta), math.cos(theta), math.sin(phi), math.cos(phi)
++    k = np.array([st*cp, ct, st*sp])
++    e = np.array([ct*cp, -st, ct*sp])
++    return np.column_stack((e, np.cross(k, e), k))
++
++
++def fold_direction(direction: Any) -> tuple[float, float, np.ndarray]:
++    """Return canonical t,p,Q with Q*k(t,p)=s; Q may be a reflection.
++
++    The full D6h group has 24 O(3) operations; they are optical symmetries,
++    NOT 24 allowed rotations in SO(3). The pose R remains proper.
++    """
++    k = unit(direction)
++    theta = math.atan2(math.hypot(k[0], k[2]), abs(k[1]))
++    az = math.atan2(k[2], k[0]) % (2*PI)
++    sector = min(5, int(az/(PI/3)))
++    local = az-sector*(PI/3)
++    mirror = local > PI/6
++    phi = PI/3-local if mirror else local
++    # Last ulps only. No finite angular folding/blur tolerance.
++    if phi < -64*EPS or phi > PI/6+64*EPS:
++        raise ValueError('Canonical azimuth outside fundamental region')
++    phi = min(PI/6, max(0., phi))
++    angle = (sector+int(mirror))*(PI/3)
++    q = ry(-angle) @ np.diag([1., -1. if k[1] < 0 else 1., -1. if mirror else 1.])
++    if np.max(np.abs(q @ canonical_frame(theta, phi)[:, 2]-k)) > 2e-12:
++        raise ValueError('Symmetry unfolding is inconsistent')
++    return theta, phi, q
++
++
++def interpolation(t: float, p: float, ntheta: int, nphi: int) -> list[tuple[int, int, float]]:
++    # Endpoint-inclusive atlas: no nearest-neighbour substitute or extrapolation.
++    if not math.isfinite(t) or not math.isfinite(p) or not -64*EPS <= t <= PI/2+64*EPS or not -64*EPS <= p <= PI/6+64*EPS:
++        raise ValueError('Incident interpolation outside canonical domain')
++    x, y = t/(PI/2)*ntheta, p/(PI/6)*nphi
++    x, y = min(float(ntheta), max(0., x)), min(float(nphi), max(0., y))
++    i, j = min(ntheta-1, int(x)), min(nphi-1, int(y))
++    a, b = x-i, y-j
++    return [(i+di, j+dj, u*v) for di, u in ((0, 1-a), (1, a))
++            for dj, v in ((0, 1-b), (1, b)) if u*v > 0]
++
++
++def projected_area(radius: float, length: float, k: Any) -> float:
++    k = unit(k)
++    normals = np.array([[1,0,0], [.5,0,math.sqrt(3)/2], [-.5,0,math.sqrt(3)/2],
++                        [-1,0,0], [-.5,0,-math.sqrt(3)/2], [.5,0,-math.sqrt(3)/2], [0,1,0], [0,-1,0]])
++    areas = np.array([radius*length]*6+[3*math.sqrt(3)*radius*radius/2]*2)
++    return float(np.dot(areas, np.maximum(0, -normals@k)))
++
++
++class Atlas:
++    def __init__(self, directory: str | Path):
++        self.directory = Path(directory)
++        if self.directory.name.endswith('.part'):
++            raise ValueError('Incomplete atlas directory')
++        with (self.directory/'metadata.json').open(encoding='utf-8') as f:
++            self.meta = json.load(f)
++        m = self.meta
++        if m.get('schema') != 'ice.single_particle_atlas.v1' or m.get('complete') is not True:
++            raise ValueError('Incomplete or unknown atlas schema')
++        if m.get('incident_reconstruction') != 'bilinear_theta_phi_in_spherical_incident_frame' or m.get('symmetry') != 'D6h_O3_full_24_scalar_unpolarized':
++            raise ValueError('Unsupported atlas frame/interpolation/symmetry')
++        self.it, self.ip = [positive_int(m[k], k, 4096) for k in ('incident_theta_intervals', 'incident_phi_intervals')]
++        self.nt, self.np = [positive_int(m[k], k) for k in ('theta_count', 'phi_count')]
++        self.mass = np.load(self.directory/'mass_mm2.npy', mmap_mode='r', allow_pickle=False)
++        self.edges = np.load(self.directory/'u_edges.npy', allow_pickle=False)
++        shape = (self.it+1, self.ip+1, self.nt, self.np)
++        if self.mass.shape != shape or self.mass.dtype.str != '<f8' or not self.mass.flags.c_contiguous:
++            raise ValueError('Atlas mass layout does not match metadata')
++        if self.edges.shape != (self.nt+1,) or self.edges.dtype.str != '<f8' or not np.isfinite(self.edges).all() or self.edges[0] != 0 or self.edges[-1] != 1 or np.any(np.diff(self.edges) <= 0):
++            raise ValueError('Invalid atlas u edges')
++        if len(m['nodes']) != (self.it+1)*(self.ip+1):
++            raise ValueError('Missing incident atlas nodes')
++        self.area = np.zeros((self.it+1, self.ip+1))
++        self.residual = np.zeros_like(self.area)
++        g = m['geometry']; self.radius, self.length = float(g['circumradius_mm']), float(g['full_length_mm'])
++        if g['shape'] != 'regular_hexagonal_prism' or not (math.isfinite(self.radius) and math.isfinite(self.length) and self.radius > 0 and self.length > 0):
++            raise ValueError('Unsupported geometry')
++        for index, n in enumerate(m['nodes']):
++            i, j = divmod(index, self.ip+1)
++            if (n['i'], n['j']) != (i, j):
++                raise ValueError('Node order mismatch')
++            f = canonical_frame(i*(PI/2)/self.it, j*(PI/6)/self.ip)
++            if not np.allclose(n['ki'], f[:,2], rtol=0, atol=2e-12) or not np.allclose(n['e0'], f[:,0], rtol=0, atol=2e-12):
++                raise ValueError('Node frame mismatch')
++            cell = self.mass[i,j]
++            if not np.isfinite(cell).all() or np.any(cell < 0):
++                raise ValueError('Invalid atlas cell mass')
++            area, residual, escaped = [float(n[k]) for k in ('projected_area_mm2', 'unresolved_mm2', 'escaped_mm2')]
++            if not all(math.isfinite(v) for v in (area, residual, escaped)) or area <= 0 or escaped <= 0 or residual < 0:
++                raise ValueError('Invalid node accounting')
++            if abs((escaped+residual)/area-1) > 2e-10 or abs(float(np.sum(cell))/escaped-1) > 2e-10 or abs(area/projected_area(self.radius,self.length,n['ki'])-1)>2e-12:
++                raise ValueError('Node area / mass / residual audit failed')
++            self.area[i,j], self.residual[i,j] = area, residual
++        self.hashes = {name: sha256_file(self.directory/name) for name in ('metadata.json','mass_mm2.npy','u_edges.npy')}
++
++    def close(self) -> None:
++        if isinstance(self.mass, np.memmap):
++            self.mass._mmap.close()
++
++
++def coupling(atlas: Atlas, rotations: np.ndarray, number_weights: np.ndarray, ki: Any) -> tuple[np.ndarray, float, np.ndarray]:
++    """Assemble nonnegative convolution weights without tracing any new rays.
++
++    At each query s, interpolate M_a/A_a and multiply the EXACT projected A(s).
++    Division by A_a is NOT division by resolved escaped mass; tails are retained.
++    Output weights [node_theta,node_phi,parity,cyclic_shift] multiply RAW M_a.
++    """
++    validate_rotations(rotations, number_weights)
++    output_frame = frame(ki); k = output_frame[:,2]
++    w = np.zeros((atlas.it+1, atlas.ip+1, 2, atlas.np), dtype=np.float64)
++    expected = []
++    for r, nw in zip(rotations, number_weights):
++        body = r.T@k
++        theta, phi, q = fold_direction(body)
++        f = canonical_frame(theta, phi)
++        e = r @ q @ f[:,0]
++        shift = math.atan2(float(e@output_frame[:,1]), float(e@output_frame[:,0]))/(2*PI)*atlas.np
++        nearest = round(shift)
++        if abs(shift-nearest) <= 64*EPS*atlas.np:
++            shift = float(nearest)  # rounding-sized integer shift, not a blur
++        lower = math.floor(shift); fraction = shift-lower
++        parity = int(np.linalg.det(q) < 0)
++        a = projected_area(atlas.radius, atlas.length, body)
++        expected.append(float(nw)*a)
++        for i, j, mix in interpolation(theta, phi, atlas.it, atlas.ip):
++            c = float(nw)*a*mix/atlas.area[i,j]
++            w[i,j,parity,lower%atlas.np] += c*(1-fraction)
++            w[i,j,parity,(lower+1)%atlas.np] += c*fraction
++    expected_area = math.fsum(expected)
++    reconstructed_area = float(np.sum(np.sum(w,axis=(2,3))*atlas.area))
++    if abs(reconstructed_area/expected_area-1) > 1e-11 or np.any(w < 0) or not np.isfinite(w).all():
++        raise ValueError('Orientation-to-convolution area audit failed')
++    return w, expected_area, output_frame
++
++
++def compose_mass(atlas: Atlas, weights: np.ndarray) -> tuple[np.ndarray, float]:
++    out = np.zeros((atlas.nt,atlas.np),dtype=np.float64)
++    # Fixed order, nonnegative direct cyclic convolution; no FFT negatives/floor.
++    for i in range(atlas.it+1):
++        for j in range(atlas.ip+1):
++            for parity in range(2):
++                cell = np.asarray(atlas.mass[i,j])
++                if parity:
++                    cell = cell[:,::-1]  # -phi maps cell j to Nphi-1-j
++                for shift, value in enumerate(weights[i,j,parity]):
++                    if value > 0:
++                        out += float(value)*np.roll(cell,shift,axis=1)
++    residual = float(np.sum(np.sum(weights,axis=(2,3))*atlas.residual))
++    if not np.isfinite(out).all() or np.any(out < 0):
++        raise ValueError('Invalid composed mass')
++    return out, residual
++
++
++def make_cdf(mass: np.ndarray, edges: np.ndarray, max_l1: float = 1e-10, max_lost: float = 1e-12) -> tuple[np.ndarray,np.ndarray,dict[str,Any]]:
++    """Ordered FP64 phi marginal + theta|phi CDF, audited against input masses.
++
++    Same external contract as rainbow. Input is integrated mass, not density.
++    No floors, repairs, smoothing, conditional-CDF averaging, or hidden coarsening.
++    """
++    if mass.ndim != 2 or not np.isfinite(mass).all() or np.any(mass < 0) or not float(np.max(mass))>0:
++        raise ValueError('CDF requires finite nonnegative nonempty mass')
++    nt,np_ = mass.shape
++    if edges.shape!=(nt+1,) or not np.isfinite(edges).all() or edges[0]!=0 or edges[-1]!=1 or np.any(np.diff(edges)<=0):
++        raise ValueError('Invalid CDF edges')
++    raw = mass / float(np.max(mass))
++    if np.any((mass>0)&(raw==0)):
++        raise ValueError('CDF rescaling underflow')
++    b = np.zeros((np_,nt+1),dtype=np.float64)
++    b[:,1:] = np.cumsum(raw.T,axis=1)
++    cols = b[:,-1].copy()
++    a = np.zeros(np_+1,dtype=np.float64); a[1:] = np.cumsum(cols)
++    if not a[-1]>0 or not math.isfinite(float(a[-1])):
++        raise ValueError('Invalid CDF total')
++    a /= a[-1]
++    for j in range(np_):
++        if cols[j]>0:
++            b[j] /= cols[j]
++        else:
++            b[j] = edges
++    if np.any(np.diff(a)<0) or np.any(np.diff(b,axis=1)<0) or a[0]!=0 or a[-1]!=1 or np.any(b[:,0]!=0) or np.any(b[:,-1]!=1):
++        raise ValueError('Malformed CDF, refusing repair')
++    total = math.fsum(mass.flat)
++    target = mass/total
++    recovered = np.diff(a)[:,None]*np.diff(b,axis=1)
++    if np.any((mass>0)&(target==0)):
++        raise ValueError('Normalized mass underflow')
++    errors = np.abs(target.T-recovered)
++    l1 = math.fsum(errors.flat)
++    lost = math.fsum(target.T[(target.T>0)&(recovered==0)])
++    g = float(np.sum(recovered*(1-edges[:-1]-edges[1:])[None,:],dtype=np.longdouble)/np.sum(recovered,dtype=np.longdouble))
++    cdf_mass = math.fsum(recovered.flat)
++    if abs(cdf_mass-1)>1e-10 or l1>max_l1 or lost>max_lost or not -1<g<1:
++        raise ValueError(f'CDF audit rejected l1={l1} lost={lost} g={g}')
++    return a,b,{'cdf_mass': cdf_mass,'cdf_l1_mass_error':l1,
++        'cdf_lost_probability_mass':lost,'cdf_maximum_cell_mass_error':float(np.max(errors)),
++        'g':g,'resolved_mass_mm2':total}
+diff --git a/hex_atlas/python/compose_atlas.py b/hex_atlas/python/compose_atlas.py
+new file mode 100644
+index 0000000..0325dc7
+--- /dev/null
++++ b/hex_atlas/python/compose_atlas.py
+@@ -0,0 +1,191 @@
++#!/usr/bin/env python3
++"""Reuse fixed single-particle atlas(es) to produce multiple rainbow-compatible CDFs.
++
++Composition is CPU/NumPy by design. Both CPU and CUDA optical precomputation
++feed this same offline operator. No trace executable is launched, no random
++orientation nodes are generated, and no output angular resolution is changed.
++"""
++from __future__ import annotations
++import argparse
++import json
++import math
++from pathlib import Path
++import sys
++import time
++from typing import Any
++import numpy as np
++from atlas_math import (Atlas, compose_mass, coupling, make_cdf, orientation_rule,
++                        sha256_file, unit)
++
++
++def write_json(path: Path, value: Any) -> None:
++    with path.open('x',encoding='utf-8',newline='\n') as f:
++        json.dump(value,f,ensure_ascii=True,allow_nan=False,indent=2)
++        f.write('\n')
++
++
++def write_npy(path: Path, value: np.ndarray) -> None:
++    with path.open('xb') as f:
++        np.save(f,np.ascontiguousarray(value,dtype='<f8'),allow_pickle=False)
++
++
++def staging_directory(out: Path) -> Path:
++    if out.name in ('', '.', '..') or out.name.endswith('.part') or out.exists():
++        raise ValueError('Output must be a new named directory, not .part')
++    part = out.with_name(out.name+'.part')
++    out.parent.mkdir(parents=True,exist_ok=True)
++    part.mkdir()  # exclusive: do not remove or adopt existing incomplete runs
++    return part
++
++
++def incidents(config: dict[str,Any]) -> list[tuple[np.ndarray,dict[str,Any]]]:
++    have = set(config) & {'inclinations_deg','directions'}
++    if len(have)!=1:
++        raise ValueError('Specify exactly one of inclinations_deg or directions')
++    result = []
++    if 'inclinations_deg' in config:
++        for value in config['inclinations_deg']:
++            a = float(value)
++            if not math.isfinite(a) or not -90<=a<=90:
++                raise ValueError('Inclination must be in [-90,90] degrees')
++            k = np.array([math.cos(math.radians(a)),-math.sin(math.radians(a)),0.])
++            if abs(a)==90:
++                k = np.array([0., -math.copysign(1,a), 0.])
++            result.append((unit(k),{'inclination_deg':a}))
++    else:
++        for k in config['directions']:
++            result.append((unit(k),{}))
++    if not result or len(result)>10000:
++        raise ValueError('Require 1..10000 incident conditions')
++    return result
++
++
++def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
++             f: np.ndarray, plan_hash: str, rule_meta: dict[str,Any], condition: dict[str,Any],
++             source_hash: str) -> dict[str,Any]:
++    g = report['g']; material = a.meta['material']; geom = a.meta['geometry'].copy()
++    geom.update(projected_area_mm2=expected,projected_area_m2=expected*1e-6,
++        projected_area_method='deterministic_orientation_quadrature_of_exact_facet_projection')
++    total = report['resolved_mass_mm2']
++    quality = {k:v for k,v in report.items() if k not in ('g','resolved_mass_mm2')}
++    quality.update(source_coverage_certified=False,angular_convergence_certified=False,
++        orientation_convergence_certified=False,incident_atlas_convergence_certified=False,
++        continuous_wave_solution_certified=False,
++        maximum_accepted_l1_mass_error=1e-10,maximum_accepted_lost_probability_mass=1e-12)
++    return dict(schema='rainbow.phase_cdf.numpy.v2',complete=True,
++        generator_version='ice.deterministic_atlas.m3.v1',backend='numpy_deterministic_atlas_convolution',
++        source_sha256=source_hash,dtype='<f8',order='C',theta_count=a.nt,phi_count=a.np,
++        density_measure='solid_angle_sr',cell_model='constant_density_per_spherical_cell',
++        coordinates='u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)',cdf_axis_order=['phi_cell','theta_edge'],
++        normalization='integral_p_domega_equals_one',input_polarization='unpolarized',
++        direction_convention='physical_propagation',theta_zero='forward',theta_pi='backward',
++        coordinate_contract_id='ice.phase_cdf.ensemble_coordinates.v1',
++        sampling_frame_layout='rows_xyz_columns_e0_e1_k',sampling_frame_map='local_column_to_ensemble_reference_column',
++        sampling_frame_columns=f.tolist(),query_frame_axis=f[:,2].tolist(),query_frame_e0=f[:,0].tolist(),
++        wavelength_nm=material['wavelength_nm'],interior_index=material['interior_index'],exterior_index=material['exterior_index'],
++        geometry=geom,material=material,
++        cross_sections=dict(model='geometric_nonabsorbing',scattering_mm2=expected,extinction_mm2=expected,absorption_mm2=0,
++            scattering_m2=expected*1e-6,extinction_m2=expected*1e-6,absorption_m2=0,wave_scattering_cross_section_computed=False),
++        single_scattering_albedo=1,stage='incoherent',diffraction_policy=dict(computed=False,selected_output_includes_diffraction=False),
++        inter_path_interference=False,tir_relative_phase_retained=True,
++        orientation=dict(representation='deterministic_SO3_number_quadrature',rule=rule_meta,
++            plan_sha256=plan_hash,randomness=False,plan_embedded=False,plan_location='dataset_root'),
++        atlas=dict(files_sha256=a.hashes,incident_theta_intervals=a.it,incident_phi_intervals=a.ip,
++            angular_reconstruction='A_normalized_bilinear_theta_phi_in_incident_spherical_frame',
++            symmetry='D6h_including_reflections',transform='phi_shift_or_phi_reflection_then_shift',
++            azimuth_remap='exact_overlap_of_piecewise_constant_equal_width_cells',
++            analytical_average_of_continuous_optics=False,no_retracing=True),
++        transport_audit=dict(escaped_mm2=total,unresolved_mm2=residual,unresolved_fraction=residual/expected,
++            balance_error=(total+residual)/expected-1,cdf_normalized_to_resolved_escaped_mass=True,
++            residual_estimator='same_covariant_incident_interpolation_as_response'),
++        storage_processing=dict(gaussian_sigma_degrees=0,coarsening_tv=0,
++            mass_conservative_aggregation=False,g_source=g,g_stored=g),
++        hg=dict(g=g,method='first_moment_of_saved_cell_pdf',target='saved_cdf',
++            cosine_convention='dot(incident_propagation,outgoing_propagation)'),
++        condition=condition,quality=quality)
++
++
++def run(atlas_paths: list[Path], config_path: Path, out: Path) -> None:
++    with config_path.open(encoding='utf-8') as f:
++        config = json.load(f)
++    if set(config) - {'orientation','inclinations_deg','directions'} or 'orientation' not in config:
++        raise ValueError('Unknown/missing composition configuration keys')
++    rotations, weights, rule_meta = orientation_rule(config['orientation'])
++    incident_list = incidents(config)
++    atlases: list[Atlas] = []
++    part = None
++    try:
++        for path in atlas_paths:
++            atlases.append(Atlas(path))
++        first = atlases[0]
++        geometry = first.meta['geometry']
++        for a in atlases[1:]:
++            if (a.it,a.ip,a.nt,a.np)!=(first.it,first.ip,first.nt,first.np) or a.meta['geometry']!=geometry or not np.array_equal(a.edges,first.edges) or not np.array_equal(a.area,first.area):
++                raise ValueError('Batch atlases must share geometry, angular grids, and areas')
++        wavelengths = [float(a.meta['material']['wavelength_nm']) for a in atlases]
++        if len(set(wavelengths))!=len(wavelengths) or any(not math.isfinite(w) or w<=0 for w in wavelengths):
++            raise ValueError('Unique positive wavelength per atlas required')
++        if (first.it+1)*(first.ip+1)*2*first.np*8 > 512*1024**2:
++            raise ValueError('Coupling buffer would exceed the documented 512 MiB bound')
++        part = staging_directory(out)
++        write_json(part/'orientation_model.json',rule_meta)
++        write_npy(part/'orientation_rotations.npy',rotations)
++        write_npy(part/'orientation_weights.npy',weights)
++        plan_hashes = {n:sha256_file(part/n) for n in ('orientation_model.json','orientation_rotations.npy','orientation_weights.npy')}
++        import hashlib
++        plan_hash = hashlib.sha256(json.dumps(plan_hashes,sort_keys=True).encode('ascii')).hexdigest()
++        source_hash = hashlib.sha256((sha256_file(Path(__file__))+sha256_file(Path(__file__).with_name('atlas_math.py'))).encode('ascii')).hexdigest()
++        plan: dict[str,Any] = dict(schema='ice.deterministic_phase_dataset.v1',complete=False,
++            per_record_schema='rainbow.phase_cdf.numpy.v2',condition_axes=['incident','wavelength'],
++            incident_directions=[k.tolist() for k,_ in incident_list],wavelengths_nm=wavelengths,
++            orientation_plan_sha256=plan_hash,orientation_files_sha256=plan_hashes,
++            input_config=config,atlases=[a.hashes for a in atlases],source_sha256=source_hash,
++            computation='deterministic_offline_mass_convolution_no_raytracing',records=[])
++        write_json(part/'generation_plan.json',plan)
++        for i,(ki,condition) in enumerate(incident_list):
++            start=time.perf_counter()
++            c,expected,fr = coupling(first,rotations,weights,ki)
++            for w,a in enumerate(atlases):
++                mass,residual = compose_mass(a,c)
++                total=math.fsum(mass.flat)
++                if abs((total+residual)/expected-1)>2e-10 or residual/expected>a.meta['transport']['max_unresolved_fraction']+2e-15:
++                    raise ValueError('Composed mass and unresolved area fail the transport audit')
++                phi,theta,report=make_cdf(mass,a.edges)
++                relative=Path('records')/f'i{i:04d}'/f'w{w:04d}'
++                record=part/relative;record.mkdir(parents=True)
++                write_npy(record/'phi_cdf.npy',phi);write_npy(record/'theta_given_phi_cdf.npy',theta);write_npy(record/'u_edges.npy',a.edges)
++                m=metadata(a,expected,residual,report,fr,plan_hash,rule_meta,condition,source_hash)
++                write_json(record/'metadata.json',m)
++                record_hashes={name:sha256_file(record/name) for name in ('metadata.json','phi_cdf.npy','theta_given_phi_cdf.npy','u_edges.npy')}
++                plan['records'].append(dict(incident_index=i,wavelength_index=w,path=relative.as_posix(),
++                    ki=ki.tolist(),wavelength_nm=wavelengths[w],g=report['g'],files_sha256=record_hashes))
++                print(f"record i={i} w={w} mass=1 g={report['g']:.17g} A={expected:.17g}")
++            print(f"incident_complete i={i} offline_seconds={time.perf_counter()-start:.6f}")
++        plan['complete']=True
++        write_json(part/'batch_plan.json',plan)
++        if out.exists():
++            raise FileExistsError('Destination appeared while composing')
++        part.rename(out)
++    except Exception as e:
++        if part is not None and part.exists() and not (part/'failure.json').exists():
++            write_json(part/'failure.json',dict(complete=False,error=str(e)))
++        raise
++    finally:
++        for a in atlases:
++            a.close()
++
++
++def main() -> None:
++    p=argparse.ArgumentParser(description=__doc__)
++    p.add_argument('--atlas',nargs='+',type=Path,required=True)
++    p.add_argument('--config',type=Path,required=True)
++    p.add_argument('--out',type=Path,required=True)
++    args=p.parse_args()
++    try:
++        run(args.atlas,args.config,args.out)
++    except Exception as e:
++        print(f"compose_atlas failed: {e!a}",file=sys.stderr)
++        raise SystemExit(2)
++
++if __name__=='__main__':
++    main()
+diff --git a/hex_atlas/python/requirements.txt b/hex_atlas/python/requirements.txt
+new file mode 100644
+index 0000000..9f161ac
+--- /dev/null
++++ b/hex_atlas/python/requirements.txt
+@@ -0,0 +1 @@
++numpy>=1.24
+diff --git a/hex_atlas/src/atlas.cpp b/hex_atlas/src/atlas.cpp
+new file mode 100644
+index 0000000..c21604d
+--- /dev/null
++++ b/hex_atlas/src/atlas.cpp
+@@ -0,0 +1,155 @@
++#include <ice_crystal/atlas.hpp>
++#include <rainbow/phase_cdf_math.hpp>
++#include <algorithm>
++#include <array>
++#include <limits>
++#include <sstream>
++#include <stdexcept>
++
++namespace iceCrystal::atlas
++{
++std::vector<AreaRay> make_area_rule(const HexPrism& h,Vec3 k,std::uint32_t n)
++{
++    if(!h.valid()||!is_unit(k)||!n||std::uint64_t(n)*n>1000000)
++        throw std::invalid_argument("Invalid area quadrature geometry / subdivision count.");
++    const double ga=1/std::sqrt(3.0),gb=std::sqrt(3.0/5.0);
++    const std::array<double,2> u{(1-ga)/2,(1+ga)/2};
++    const std::array<double,3> v{(1-gb)/2,0.5,(1+gb)/2},vw{5.0/18,4.0/9,5.0/18};
++    std::vector<AreaRay> rays;
++    Sum area{};
++    for(unsigned f=0;f<8;++f)
++    {
++        const double projected=h.face_area_mm2(f)*max_value(0,-h.normal(f).dot(k));
++        if(projected==0)continue;
++        const unsigned sectors=f<6?1:6;
++        for(unsigned sector=0;sector<sectors;++sector)
++        for(std::uint32_t a=0;a<n;++a)for(std::uint32_t b=0;b<n;++b)
++        for(unsigned i=0;i<2;++i)for(unsigned j=0;j<3;++j)
++        {
++            const double x=(a+u[i])/n,y=(b+v[j])/n;
++            AreaRay q{};q.entry.face=f;q.entry.valid=true;
++            if(f<6)
++            {
++                const auto normal=h.normal(f);const Vec3 t{-normal.z,0,normal.x};
++                q.entry.position=normal*(sqrt3/2)+t*(x-0.5)+Vec3{0,(2*y-1)*h.half_length(),0};
++            }
++            else
++            {
++                q.entry.position=(h.vertex(sector)*(1-y)+h.vertex(sector+1)*y)*std::sqrt(x);
++                q.entry.position.y=(f==6?1:-1)*h.half_length();
++            }
++            q.projected_weight_mm2=(projected/sectors/double(n)/n)*0.5*vw[j];
++            if(!(q.projected_weight_mm2>0)||!finite_value(q.projected_weight_mm2)||
++               !strict_face_point(h,q.entry.position,f))
++                throw std::runtime_error("Area quadrature is not representable / lies on ambiguous boundary.");
++            rays.push_back(q);area.add(q.projected_weight_mm2);
++        }
++    }
++    if(rays.empty()||std::fabs(area.value/h.projected_area_mm2(k)-1)>1e-12)
++        throw std::runtime_error("Projected-area quadrature failed conservation audit.");
++    return rays;
++}
++void validate(const Settings& s)
++{
++    if(!s.prism.valid()||!(s.interior_index>0&&s.exterior_index>0&&s.wavelength_nm>0)||
++       !finite_value(s.interior_index)||!finite_value(s.exterior_index)||!finite_value(s.wavelength_nm)||
++       !s.incident_theta_intervals||!s.incident_phi_intervals||
++       s.incident_theta_intervals>4096||s.incident_phi_intervals>4096||
++       !s.theta_count||!s.phi_count||std::uint64_t(s.theta_count)*s.phi_count>100000000||
++       !s.area_subdivisions||std::uint64_t(s.area_subdivisions)*s.area_subdivisions>1000000||
++       !s.max_internal_hits||!s.batch_rays||!s.max_work_bytes)
++        throw std::invalid_argument("Invalid atlas settings.");
++    for(double v:{s.tail_tolerance,s.max_unresolved_fraction,s.max_balance_error})
++        if(!finite_value(v)||v<0||v>=1)throw std::invalid_argument("Invalid audit tolerance.");
++    if(s.tail_tolerance>s.max_unresolved_fraction)throw std::invalid_argument("Ray tail exceeds global unresolved budget.");
++    const auto cells=std::uint64_t(s.theta_count)*s.phi_count;
++    if(s.batch_rays>s.max_work_bytes/sizeof(Sum)/cells)
++        throw std::length_error("Requested deterministic per-ray grid exceeds --max-work-mib; lower --batch-rays explicitly.");
++}
++Node make_node(const Settings& s,std::uint32_t i,std::uint32_t j)
++{
++    validate(s);
++    if(i>s.incident_theta_intervals||j>s.incident_phi_intervals)throw std::out_of_range("Incident node index.");
++    Node n;n.theta=(pi/2)*i/s.incident_theta_intervals;n.phi=(pi/6)*j/s.incident_phi_intervals;
++    const double st=i==0?0:(i==s.incident_theta_intervals?1:std::sin(n.theta));
++    const double ct=i==0?1:(i==s.incident_theta_intervals?0:std::cos(n.theta));
++    const double sp=j==0?0:(j==s.incident_phi_intervals?0.5:std::sin(n.phi));
++    const double cp=j==0?1:(j==s.incident_phi_intervals?sqrt3/2:std::cos(n.phi));
++    Vec3 k{st*cp,ct,st*sp};normalize(k,k);
++    n.area_rays=make_area_rule(s.prism,k,s.area_subdivisions);
++    n.trace=make_trace_settings(s.prism,k,s.exterior_index,s.interior_index,n.area_rays.size(),0,
++        s.max_internal_hits,s.tail_tolerance);
++    k=n.trace.incident_direction;
++    Vec3 e{ct*cp,-st,ct*sp};normalize(e,e);
++    n.trace.incident_frame={e,k.cross(e)};
++    if(!n.trace.incident_frame.valid(k))throw std::runtime_error("Invalid incident spherical frame.");
++    n.grid={nullptr,k,n.trace.incident_frame,s.theta_count,s.phi_count};
++    n.u_edges=rainbow::make_phase_u_edges(s.theta_count);return n;
++}
++void add_audits(Result& r,std::span<const RayAudit> audits,std::span<const AreaRay> rays,double tolerance)
++{
++    if(audits.size()!=rays.size())throw std::logic_error("Area/audit size mismatch.");
++    const auto summary=summarize(audits,tolerance);merge_summary(r.audit,summary);
++    for(std::size_t k=0;k<rays.size();++k)
++    {
++        const auto& a=audits[k];
++        if(!accepted_status(a.status)||!finite_value(a.max_interface_balance_error)||
++           a.max_interface_balance_error>tolerance)
++        {
++            std::ostringstream os;os<<"Deterministic area ray rejected: local_id="<<k<<" face="<<rays[k].entry.face
++                <<" status="<<status_name(a.status)<<" residual="<<a.unresolved_power
++                <<". No jitter, dropped ray, or renormalized omission is applied.";
++            throw std::runtime_error(os.str());
++        }
++        r.escaped_accumulator.add(rays[k].projected_weight_mm2*a.escaped_power);
++        r.unresolved_accumulator.add(rays[k].projected_weight_mm2*a.unresolved_power);
++        r.escaped_mm2=r.escaped_accumulator.value;
++        r.unresolved_mm2=r.unresolved_accumulator.value;
++    }
++    require_accepted(summary);
++}
++void finish(Result& r,const Settings& s,const Node& n)
++{
++    r.projected_area_mm2=s.prism.projected_area_mm2(n.trace.incident_direction);
++    Sum total{};for(double w:r.mass_mm2)
++    {if(!finite_value(w)||w<0)throw std::runtime_error("Invalid atlas cell mass.");total.add(w);}
++    if(!(total.value>0)||!(r.escaped_mm2>0)||r.audit.rays!=n.area_rays.size())
++        throw std::runtime_error("Incomplete atlas node.");
++    r.histogram_relative_error=std::fabs(total.value/r.escaped_mm2-1);
++    if(r.histogram_relative_error>s.max_balance_error||
++       std::fabs((r.escaped_mm2+r.unresolved_mm2)/r.projected_area_mm2-1)>s.max_balance_error||
++       r.unresolved_mm2/r.projected_area_mm2>s.max_unresolved_fraction)
++        throw std::runtime_error("Atlas area / escaped / residual conservation audit failed.");
++}
++void validate_node(const Settings& s,const Node& n)
++{
++    validate(s);
++    if(n.grid.nt!=s.theta_count||n.grid.np!=s.phi_count||n.u_edges.size()!=std::size_t(s.theta_count)+1||
++       n.area_rays.empty()||n.trace.total_incident_samples!=n.area_rays.size()||
++       n.trace.max_internal_hits!=s.max_internal_hits||n.trace.residual_power_tolerance!=s.tail_tolerance||
++       n.trace.prism.circumradius_mm!=s.prism.circumradius_mm||n.trace.prism.length_mm!=s.prism.length_mm||
++       n.trace.interior_index!=s.interior_index||n.trace.exterior_index!=s.exterior_index||
++       !n.grid.frame.valid(n.grid.ki)||!settings_valid(n.trace)||
++       (n.grid.ki-n.trace.incident_direction).max_abs()!=0)
++        throw std::invalid_argument("Atlas node does not match trace settings.");
++    if(n.u_edges.front()!=0||n.u_edges.back()!=1)throw std::invalid_argument("Invalid u endpoints.");
++    for(std::size_t i=1;i<n.u_edges.size();++i)
++        if(!finite_value(n.u_edges[i])||!(n.u_edges[i]>n.u_edges[i-1]))throw std::invalid_argument("Invalid u edges.");
++}
++Result trace_cpu(const Settings& s,const Node& n)
++{
++    validate_node(s,n);
++    Result r;const auto size=std::size_t(s.theta_count)*s.phi_count;
++    std::vector<Sum> accumulated(size),per_ray(size);
++    for(std::size_t id=0;id<n.area_rays.size();++id)
++    {
++        std::fill(per_ray.begin(),per_ray.end(),Sum{});
++        MassSink sink{n.view(),per_ray.data(),1,0,n.area_rays[id].projected_weight_mm2};
++        const auto audit=trace_from_entry(n.trace,id,n.area_rays[id].entry,sink);
++        add_audits(r,{&audit,1},{&n.area_rays[id],1},s.max_balance_error);
++        for(std::size_t k=0;k<size;++k)if(per_ray[k].value>0)accumulated[k].add(per_ray[k].value);
++    }
++    r.mass_mm2.resize(size);for(std::size_t k=0;k<size;++k)r.mass_mm2[k]=accumulated[k].value;
++    finish(r,s,n);return r;
++}
++}
+diff --git a/hex_atlas/src/atlas_cuda.cpp b/hex_atlas/src/atlas_cuda.cpp
+new file mode 100644
+index 0000000..45aeb2b
+--- /dev/null
++++ b/hex_atlas/src/atlas_cuda.cpp
+@@ -0,0 +1,58 @@
++#include <ice_crystal/atlas_cuda.hpp>
++#include <rainbow/cuda_host_upload.hpp>
++#include <algorithm>
++#include <limits>
++#include <stdexcept>
++namespace iceCrystal::atlas
++{
++CudaTracer::CudaTracer(const rainbow::CudaContext& c,const std::filesystem::path& path)
++    :context_(c),module_(c),rays_(c),audits_(c),partial_(c),mass_(c),edges_(c)
++{
++    module_.load_fatbin(path);static_cast<void>(module_.find_function("ice_atlas_abi_m3_v1"));
++}
++CudaTracer::~CudaTracer() noexcept
++{
++    if(pending_)
++    {
++        static_cast<void>(rainbow::detail::report_cuda_cleanup_result(cuCtxSetCurrent(context_.handle()),"atlas cleanup context"));
++        static_cast<void>(rainbow::detail::report_cuda_cleanup_result(cuStreamSynchronize(context_.stream()),"atlas cleanup sync"));
++    }
++}
++void CudaTracer::sync()
++{context_.make_current();RAINBOW_CUDA_CHECK(cuStreamSynchronize(context_.stream()));pending_=false;}
++void CudaTracer::launch(const char* name,void** args,unsigned blocks)
++{
++    context_.make_current();pending_=true;
++    RAINBOW_CUDA_CHECK(cuLaunchKernel(module_.find_function(name),blocks,1,1,128,1,1,0,context_.stream(),args,nullptr));
++}
++Result CudaTracer::trace(const Settings& s,const Node& n)
++{
++    validate_node(s,n);sync();rays_.close();audits_.close();partial_.close();mass_.close();edges_.close();
++    const auto batch=std::min(s.batch_rays,n.area_rays.size());
++    const auto cells=std::uint64_t(s.theta_count)*s.phi_count;
++    if(batch>std::numeric_limits<unsigned>::max()*std::uint64_t(128))throw std::length_error("Atlas batch launch too large.");
++    rays_.allocate(batch);audits_.allocate(batch);partial_.allocate(std::size_t(cells)*batch);
++    mass_.allocate(cells);edges_.allocate(n.u_edges.size());
++    rainbow::upload_host_to_device_sync(context_,edges_.address(),n.u_edges.data(),edges_.byte_size());
++    pending_=true;mass_.zero_byte_async(context_.stream());
++    Result r;
++    for(std::size_t first=0;first<n.area_rays.size();first+=batch)
++    {
++        const auto count=std::min(batch,n.area_rays.size()-first);
++        rainbow::upload_host_to_device_sync(context_,rays_.address(),n.area_rays.data()+first,count*sizeof(AreaRay));
++        pending_=true;partial_.zero_byte_async(context_.stream());
++        BatchParams p{};p.trace=n.trace;p.grid=n.view();p.grid.u_edges=edges_.data();
++        p.rays=rays_.data();p.audits=audits_.data();p.mass=partial_.data();p.first=first;p.count=count;
++        void* args[]={&p};launch("atlas_trace_area",args,static_cast<unsigned>((count+127)/128));sync();
++        std::vector<RayAudit> audits(count);
++        RAINBOW_CUDA_CHECK(cuMemcpyDtoH(audits.data(),audits_.address(),count*sizeof(RayAudit)));
++        // A rejected batch is never committed to the accumulated table.
++        add_audits(r,audits,{n.area_rays.data()+first,count},s.max_balance_error);
++        const auto* in=partial_.data();auto* out=mass_.data();auto nr=std::uint64_t(count),nc=cells;
++        void* reduce[]={&in,&out,&nc,&nr};launch("atlas_reduce_ordered",reduce,static_cast<unsigned>((cells+127)/128));
++    }
++    sync();std::vector<Sum> sums(cells);mass_.download(sums);r.mass_mm2.resize(cells);
++    for(std::size_t k=0;k<cells;++k)r.mass_mm2[k]=sums[k].value;
++    finish(r,s,n);return r;
++}
++}
+diff --git a/hex_atlas/tests/atlas_cuda_tests.cpp b/hex_atlas/tests/atlas_cuda_tests.cpp
+new file mode 100644
+index 0000000..c008aa4
+--- /dev/null
++++ b/hex_atlas/tests/atlas_cuda_tests.cpp
+@@ -0,0 +1,30 @@
++#include <ice_crystal/atlas_cuda.hpp>
++#include <algorithm>
++#include <iostream>
++#include <stdexcept>
++int main(int argc,char** argv)
++{
++    (void)argc;
++    try
++    {
++        rainbow::CudaContext context;
++        const auto modules=std::filesystem::absolute(argv[0]).parent_path()/"modules";
++        iceCrystal::atlas::CudaTracer gpu(context,modules/"atlas_trace.fatbin");
++        iceCrystal::atlas::Settings s;s.prism={.1,.2};s.interior_index=1.31;s.wavelength_nm=550;
++        s.incident_theta_intervals=3;s.incident_phi_intervals=2;s.theta_count=12;s.phi_count=24;s.area_subdivisions=2;
++        for(unsigned i=0;i<=3;++i)for(unsigned j=0;j<=2;++j)
++        {
++            const auto n=iceCrystal::atlas::make_node(s,i,j);const auto cpu=iceCrystal::atlas::trace_cpu(s,n);
++            s.batch_rays=17;const auto a=gpu.trace(s,n);const auto again=gpu.trace(s,n);
++            if(a.mass_mm2!=again.mass_mm2)throw std::runtime_error("Repeated GPU atlas not bitwise equal");
++            s.batch_rays=64;const auto b=gpu.trace(s,n);
++            if(a.mass_mm2!=b.mass_mm2)throw std::runtime_error("GPU ordered sum depends on batch size");
++            double error=0;for(std::size_t k=0;k<a.mass_mm2.size();++k)error+=std::fabs(a.mass_mm2[k]-cpu.mass_mm2[k]);
++            if(error/cpu.projected_area_mm2>2e-9||a.audit.rays!=cpu.audit.rays||a.audit.outputs!=cpu.audit.outputs)
++                throw std::runtime_error("CPU/CUDA atlas mass or trace count mismatch");
++            std::cout<<"atlas_node="<<i<<','<<j<<" L1_relative="<<error/cpu.projected_area_mm2<<" repeat=bitwise batch=bitwise\n";
++        }
++        std::cout<<"CUDA atlas PASS (not skipped)\n";return 0;
++    }
++    catch(const std::exception& e){std::cerr<<"CUDA atlas FAILED (not skipped): "<<e.what()<<'\n';return 1;}
++}
+diff --git a/hex_atlas/tests/atlas_tests.cpp b/hex_atlas/tests/atlas_tests.cpp
+new file mode 100644
+index 0000000..abc73d4
+--- /dev/null
++++ b/hex_atlas/tests/atlas_tests.cpp
+@@ -0,0 +1,94 @@
++#include <ice_crystal/atlas.hpp>
++#include <algorithm>
++#include <array>
++#include <iostream>
++#include <stdexcept>
++#include <string>
++using namespace iceCrystal;
++namespace
++{
++void require(bool b,const char* why){if(!b)throw std::runtime_error(why);}
++template<class F> void rejects(F f){bool hit=false;try{f();}catch(const std::exception&){hit=true;}require(hit,"Expected rejection");}
++atlas::Settings settings()
++{
++    atlas::Settings s;s.prism={.1,.2};s.interior_index=1.31;s.wavelength_nm=550;
++    s.incident_theta_intervals=3;s.incident_phi_intervals=2;s.theta_count=12;s.phi_count=24;s.area_subdivisions=2;return s;
++}
++Vec3 transform(Vec3 v,unsigned rot,bool mirror,bool flip)
++{
++    if(mirror)v.z=-v.z;
++    if(flip)v.y=-v.y;
++    const double a=rot*pi/3,c=std::cos(a),s=std::sin(a);
++    return {c*v.x-s*v.z,v.y,s*v.x+c*v.z};
++}
++struct VectorSink
++{
++    std::vector<OutgoingSample> samples;
++    bool push(const OutgoingSample& s){samples.push_back(s);return true;}
++};
++void area_test()
++{
++    const HexPrism h{.1,.7};
++    for(Vec3 k: {Vec3{1,0,0},Vec3{0,1,0},Vec3{1,2,3},Vec3{-1,-.001,-.9}})
++    {
++        normalize(k,k);const auto r=atlas::make_area_rule(h,k,3);Sum sum{};
++        for(const auto& a:r){require(a.projected_weight_mm2>0,"Nonpositive area");require(strict_face_point(h,a.entry.position,a.entry.face),"Invalid area point");sum.add(a.projected_weight_mm2);}
++        require(std::fabs(sum.value/h.projected_area_mm2(k)-1)<5e-14,"Area integration");
++        const auto same=atlas::make_area_rule(h,k,3);require(same.size()==r.size(),"Nondeterministic count");
++        for(std::size_t i=0;i<r.size();++i)require((same[i].entry.position-r[i].entry.position).max_abs()==0 && same[i].projected_weight_mm2==r[i].projected_weight_mm2,"Nondeterministic quadrature");
++    }
++}
++void nodes_test()
++{
++    auto s=settings();
++    for(unsigned i=0;i<=s.incident_theta_intervals;++i)for(unsigned j=0;j<=s.incident_phi_intervals;++j)
++    {
++        const auto n=atlas::make_node(s,i,j);auto r=atlas::trace_cpu(s,n);
++        require(n.trace.incident_frame.valid(n.trace.incident_direction),"Bad frame");
++        require(r.audit.accepted && r.histogram_relative_error<1e-12,"Node audit");
++        auto repeat=atlas::trace_cpu(s,n);require(r.mass_mm2==repeat.mass_mm2,"CPU repeat not bitwise equal");
++    }
++    s.interior_index=1;
++    auto n=atlas::make_node(s,1,1);auto r=atlas::trace_cpu(s,n);
++    for(unsigned i=0;i<s.theta_count;++i)for(unsigned j=0;j<s.phi_count;++j)
++        require(std::fabs(r.mass_mm2[std::size_t(i)*s.phi_count+j]-(i==0?r.projected_area_mm2/s.phi_count:0))<1e-15,"Index matched delta/cap");
++}
++void symmetry_test()
++{
++    auto s=settings();auto n=atlas::make_node(s,1,1);
++    for(unsigned rot=0;rot<6;++rot)for(unsigned m=0;m<2;++m)for(unsigned y=0;y<2;++y)
++    {
++        auto c=n.trace;normalize(transform(c.incident_direction,rot,m,y),c.incident_direction);
++        normalize(transform(n.trace.incident_frame.e0,rot,m,y),c.incident_frame.e0);
++        c.incident_frame.e1=c.incident_direction.cross(c.incident_frame.e0);
++        for(unsigned id: {0u,7u,19u,47u})
++        {
++            VectorSink a,b;auto e=n.area_rays[id].entry;
++            auto aa=trace_from_entry(n.trace,id,e,a);
++            e.position=transform(e.position,rot,m,y);
++            const auto expected_normal=transform(s.prism.normal(e.face),rot,m,y);
++            for(unsigned f=0;f<8;++f)if((expected_normal-s.prism.normal(f)).max_abs()<2e-14){e.face=f;break;}
++            auto bb=trace_from_entry(c,id,e,b);
++            require(accepted_status(aa.status)&&accepted_status(bb.status)&&a.samples.size()==b.samples.size(),"Symmetry trace status/order");
++            for(std::size_t j=0;j<a.samples.size();++j)
++            {
++                require((transform(a.samples[j].direction,rot,m,y)-b.samples[j].direction).max_abs()<5e-12,"O3 transformed direction");
++                require(std::fabs(a.samples[j].power_fraction-b.samples[j].power_fraction)<5e-12,"O3 unpolarized power");
++            }
++        }
++    }
++}
++void failures_test()
++{
++    auto s=settings();s.max_internal_hits=1;auto n=atlas::make_node(s,1,1);
++    rejects([&]{static_cast<void>(atlas::trace_cpu(s,n));});
++    s=settings();s.area_subdivisions=0;rejects([&]{atlas::validate(s);});
++    s=settings();s.max_work_bytes=1;rejects([&]{atlas::validate(s);});
++}
++}
++int main()
++{
++    try{area_test();std::cout<<"area_quadrature PASS\n";nodes_test();std::cout<<"nodes_repeat_delta PASS\n";
++        symmetry_test();std::cout<<"all_24_O3_ray_transforms PASS\n";failures_test();std::cout<<"failure_gates PASS\n";return 0;}
++    catch(const std::exception& e){std::cerr<<"Atlas host FAILED: "<<e.what()<<'\n';return 1;}
++}
+diff --git a/hex_atlas/tests/cli_test.py b/hex_atlas/tests/cli_test.py
+new file mode 100644
+index 0000000..d23e6ce
+--- /dev/null
++++ b/hex_atlas/tests/cli_test.py
+@@ -0,0 +1,61 @@
++"""End-to-end deterministic atlas -> multiple conditions -> original reader."""
++import hashlib
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import numpy as np
++
++exe=Path(sys.argv[1]).resolve();repo=Path(sys.argv[2]).resolve()
++sys.path.insert(0,str(repo/'python'))
++from rainbow_dataset import PhaseRecord
++compose=repo/'hex_atlas/python/compose_atlas.py'
++
++def run(args,expected=0):
++    p=subprocess.run([str(a) for a in args],capture_output=True)
++    if p.returncode!=expected:
++        raise RuntimeError(f'returncode={p.returncode} expected={expected}; stdout={p.stdout!r}; stderr={p.stderr!r}')
++    return p
++
++def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
++
++with tempfile.TemporaryDirectory(prefix='ice_atlas_cli_') as tmp:
++    root=Path(tmp)
++    base=[exe,'--radius-mm','.1','--length-mm','.2','--ior','1.31',
++          '--incident-theta-intervals','3','--incident-phi-intervals','2',
++          '--theta','12','--phi','24','--area-subdivisions','2']
++    paths=[]
++    for wave in (550,650):
++        a=root/f'atlas{wave}';run([*base,'--wavelength-nm',str(wave),'--out',a]);paths.append(a)
++    before={str(a):digest(a/'mass_mm2.npy') for a in paths}
++    config={'inclinations_deg':[0,35,80],'orientation':{
++        'quadrature':{'azimuth':4,'tilt':4,'spin':3},'components':[
++            {'kind':'horizontal_gaussian','sigma_deg':10,'fraction':.75},
++            {'kind':'isotropic','fraction':.25}]}}
++    cfg=root/'compose.json';cfg.write_text(json.dumps(config),encoding='utf-8')
++    cmd=[sys.executable,compose,'--atlas',*paths,'--config',cfg]
++    # Composer gets no executable path and cannot call the optical trace backend.
++    out=root/'dataset';run([*cmd,'--out',out]);out2=root/'repeat';run([*cmd,'--out',out2])
++    plan=json.loads((out/'batch_plan.json').read_text());assert plan['complete']
++    assert len(plan['records'])==6
++    values=[]
++    for r in plan['records']:
++        path=out/r['path']
++        with PhaseRecord(path,validate=True) as record:
++            mass,g=record.mass_and_g();assert abs(mass-1)<1e-12
++            assert record.metadata['orientation']['randomness'] is False
++            assert record.metadata['atlas']['no_retracing'] is True
++            assert abs(record.metadata['transport_audit']['balance_error'])<2e-10
++            values.append(g)
++        for name in ('phi_cdf.npy','theta_given_phi_cdf.npy','u_edges.npy'):
++            assert (path/name).read_bytes()==(out2/r['path']/name).read_bytes()
++        assert set(p.name for p in path.iterdir())=={'metadata.json','phi_cdf.npy','theta_given_phi_cdf.npy','u_edges.npy'}
++    assert max(values)-min(values)>.01,'Incident condition was lost during composition'
++    assert all(digest(a/'mass_mm2.npy')==before[str(a)] for a in paths)
++    run([*cmd,'--out',out],2) # no replacement of an existing dataset
++    run([*base,'--wavelength-nm','550','--out',paths[0]],2)
++    run([*base,'--wavelength-nm','550','--out',root/'fail','--max-internal-hits','1'],2)
++    assert not (root/'fail').exists() and (root/'fail.part').exists()
++    print('PASS: 2 atlases, 3 incidents, 6 unchanged-reader records; repeat identical; no retrace; failure gates')
+diff --git a/hex_atlas/tests/test_compose.py b/hex_atlas/tests/test_compose.py
+new file mode 100644
+index 0000000..5eb240d
+--- /dev/null
++++ b/hex_atlas/tests/test_compose.py
+@@ -0,0 +1,116 @@
++from pathlib import Path
++import math
++import sys
++import unittest
++from types import SimpleNamespace
++import numpy as np
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'python'))
++from atlas_math import (canonical_frame, fold_direction, interpolation, gaussian_tilt_nodes,
++    orientation_rule, projected_area, coupling, compose_mass, frame, make_cdf, ry, rz)
++
++
++def fixture():
++    it,ip,nt,np_=6,3,4,12
++    area=np.zeros((it+1,ip+1));mass=np.zeros((it+1,ip+1,nt,np_))
++    pattern=np.arange(1,nt*np_+1,dtype=float).reshape(nt,np_);pattern/=pattern.sum()
++    for i in range(it+1):
++        for j in range(ip+1):
++            area[i,j]=projected_area(.1,.2,canonical_frame(i*math.pi/2/it,j*math.pi/6/ip)[:,2])
++            mass[i,j]=area[i,j]*pattern
++    return SimpleNamespace(it=it,ip=ip,nt=nt,np=np_,area=area,mass=mass,residual=np.zeros_like(area),radius=.1,length=.2)
++
++
++class Tests(unittest.TestCase):
++    def test_fold_full_sphere(self):
++        for theta in np.linspace(0,math.pi,21):
++            for phi in np.linspace(0,2*math.pi,43):
++                k=canonical_frame(theta,phi)[:,2];t,p,q=fold_direction(k)
++                self.assertTrue(0<=t<=math.pi/2 and 0<=p<=math.pi/6)
++                np.testing.assert_allclose(q@canonical_frame(t,p)[:,2],k,atol=2e-14)
++                np.testing.assert_allclose(q.T@q,np.eye(3),atol=2e-14)
++
++    def test_gaussian_cdf_nodes(self):
++        for sigma in (.1,3,10,90):
++            n=16;b=gaussian_tilt_nodes(n,sigma);s=math.radians(sigma)
++            e=math.erf(math.pi/(2*math.sqrt(2)*s))
++            c=np.array([(1+math.erf((x-math.pi/2)/(math.sqrt(2)*s))/e)/2 for x in b])
++            np.testing.assert_allclose(c,(np.arange(n)+.5)/n,atol=6e-14,rtol=0)
++            np.testing.assert_allclose(b+b[::-1],math.pi,atol=2e-15)
++        np.testing.assert_array_equal(gaussian_tilt_nodes(4,0),[math.pi/2]*4)
++
++    def test_rule_no_rng_and_weights(self):
++        config={'quadrature':{'azimuth':4,'tilt':8,'spin':3},'components':[
++            {'kind':'horizontal_gaussian','sigma_deg':3,'fraction':.9},{'kind':'isotropic','fraction':.1}]}
++        a,w,m=orientation_rule(config);b,v,_=orientation_rule(config)
++        np.testing.assert_array_equal(a,b);np.testing.assert_array_equal(w,v)
++        self.assertFalse(m['randomness']);self.assertAlmostEqual(math.fsum(w[:96]),.9)
++        self.assertAlmostEqual(math.fsum(w[96:]),.1)
++
++    def test_bad_rule(self):
++        for sigma in (-1,float('nan')):
++            with self.assertRaises(ValueError):gaussian_tilt_nodes(10,sigma)
++        with self.assertRaises(ValueError):orientation_rule({'quadrature':{'azimuth':2,'tilt':2,'spin':2},'components':[{'kind':'isotropic','fraction':.5}]})
++
++    def test_interpolation_endpoints_and_partition(self):
++        for i in range(7):
++            for j in range(4):
++                terms=interpolation(i*math.pi/12,j*math.pi/18,6,3)
++                self.assertAlmostEqual(sum(w for _,_,w in terms),1)
++                self.assertAlmostEqual(sum(w for ii,jj,w in terms if (ii,jj)==(i,j)),1)
++        for t in np.linspace(0,math.pi/2,21):
++            terms=interpolation(t,.14,6,3)
++            self.assertTrue(all(w>=0 for _,_,w in terms))
++            self.assertAlmostEqual(sum(w for _,_,w in terms),1)
++
++    def test_no_incident_extrapolation(self):
++        with self.assertRaises(ValueError):interpolation(-.01,.1,6,3)
++        with self.assertRaises(ValueError):interpolation(.1,.6,6,3)
++
++    def test_shift_and_reflection(self):
++        a=fixture();f=canonical_frame(math.pi/6,math.pi/18);fw=frame([1,0,0])
++        for reflected in (False,True):
++            q=np.diag([1.,1.,-1.]) if reflected else np.eye(3)
++            for shift in (0,1,2.3,-.7,11.999):
++                d=2*math.pi*shift/a.np
++                h=np.array([[math.cos(d),-math.sin(d),0],[math.sin(d),math.cos(d),0],[0,0,1.]])
++                if reflected:h=h@np.diag([1.,-1.,1.])
++                r=fw@h@f.T@q.T
++                w,expected,_=coupling(a,np.array([r]),np.ones(1),[1,0,0])
++                result,residual=compose_mass(a,w)
++                original=a.mass[2,1]
++                if reflected:original=original[:,::-1]
++                lower=math.floor(shift);fraction=shift-lower
++                reference=(1-fraction)*np.roll(original,lower,axis=1)+fraction*np.roll(original,lower+1,axis=1)
++                np.testing.assert_allclose(result,reference,atol=3e-17,rtol=1e-12)
++                self.assertAlmostEqual(result.sum(),expected);self.assertEqual(residual,0)
++
++    def test_area_weighted_mixture(self):
++        a=fixture();rot=np.array([np.eye(3),rz(math.pi/2)])
++        w,area,_=coupling(a,rot,np.array([.25,.75]),[1,0,0])
++        out,tail=compose_mass(a,w)
++        exact=.25*projected_area(.1,.2,[1,0,0])+.75*projected_area(.1,.2,[0,-1,0])
++        self.assertAlmostEqual(area,exact);self.assertAlmostEqual(out.sum()+tail,exact)
++
++    def test_residual_not_renormalized_away(self):
++        a=fixture();a.mass*=.99;a.residual=.01*a.area
++        w,area,_=coupling(a,np.array([ry(.213)@rz(.7)]),np.ones(1),[1,-.4,.3])
++        mass,tail=compose_mass(a,w)
++        self.assertAlmostEqual(mass.sum()/area,.99);self.assertAlmostEqual(tail/area,.01)
++
++    def test_cdf_uniform_and_zero_rows(self):
++        edges=(1-np.cos(np.linspace(0,math.pi,9)))/2
++        for mass in (np.repeat(np.diff(edges)[:,None]/12,12,axis=1),np.eye(8,12)):
++            a,b,r=make_cdf(mass,edges)
++            recovered=np.diff(a)[:,None]*np.diff(b,axis=1)
++            np.testing.assert_allclose(recovered.T,mass/mass.sum(),atol=2e-15)
++            self.assertAlmostEqual(r['cdf_mass'],1)
++            zero=np.diff(a)==0
++            if zero.any():np.testing.assert_array_equal(b[zero],np.repeat(edges[None,:],zero.sum(),axis=0))
++
++    def test_cdf_dynamic_range_and_rejection(self):
++        edges=np.linspace(0,1,9);mass=np.geomspace(1e-14,1,96).reshape(8,12)
++        _,_,r=make_cdf(mass,edges);self.assertLess(r['cdf_l1_mass_error'],1e-12)
++        with self.assertRaises(ValueError):make_cdf(-mass,edges)
++        with self.assertRaises(ValueError):make_cdf(np.zeros_like(mass),edges)
++
++if __name__=='__main__':unittest.main(verbosity=2)

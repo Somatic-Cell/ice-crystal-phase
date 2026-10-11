@@ -1,0 +1,404 @@
+diff --git a/hex_atlas/CMakeLists.txt b/hex_atlas/CMakeLists.txt
+index 0406118..b73f2ae 100644
+--- a/hex_atlas/CMakeLists.txt
++++ b/hex_atlas/CMakeLists.txt
+@@ -94,6 +94,7 @@ if(ICE_ATLAS_BUILD_TESTS)
+         execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import numpy" RESULT_VARIABLE _atlas_numpy OUTPUT_QUIET ERROR_QUIET)
+         if(_atlas_numpy EQUAL 0)
+             add_test(NAME ice_atlas_python COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/test_compose.py")
++            add_test(NAME ice_atlas_polar_azimuth COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/test_polar_azimuth.py")
+             add_test(NAME ice_atlas_cli COMMAND "${Python3_EXECUTABLE}" "${ICE_ATLAS_ROOT}/tests/cli_test.py"
+                 "$<TARGET_FILE:ice_precompute_atlas_cpu>" "${ICE_ATLAS_REPO}")
+         endif()
+diff --git a/hex_atlas/POLAR_AZIMUTH_FIX.md b/hex_atlas/POLAR_AZIMUTH_FIX.md
+new file mode 100644
+index 0000000..0d999f5
+--- /dev/null
++++ b/hex_atlas/POLAR_AZIMUTH_FIX.md
+@@ -0,0 +1,72 @@
++# M3 polar-azimuth hotfix 1
++
++## 修正対象
++
++付属 `horizontal_gaussian.json` の世界入射傾斜90度では，柱軸方位角 alpha が一様な
++配向分布と鉛直入射の組合せなので，スカラー位相関数は出射 phi に依存しない．
++M3 は alpha を16点の中点求積で近似していたため，5度幅の出射セルへ疎な単粒子応答を
++シフト合成すると，周期模様と40--45度帯のゼロセルが残った．
++配布済み CPU example atlas の同条件で，ゼロ24セルを再現した．ゼロは CDF 前の光束にも
++存在し，CDF 丸めで正値を失ったものではなかった．この原因は CPU/CUDA 共通の合成器にある．
++
++## 数学的な変更
++
++R=Ry(alpha) Rz(beta) Ry(gamma)，ki=(0,+/-1,0) では R.T ki と投影面積は alpha に
++依存しない．alpha は出射 phi の平行移動だけを与える．したがって，
++
++    (1/(2*pi)) integral_0^(2*pi) K(theta,phi-alpha) d alpha
++
++は各 theta における方位角平均であり，区分一定の有限セルモデルに対して厳密に評価できる．
++修正は画像や最終 PDF にフィルタをかけず，配向成分ごとの循環畳み込みカーネルを一様にする．
++単粒子の生の非正規化セル光束，投影面積の重み，未回収光束は保持する．
++
++- `horizontal_gaussian` / `isotropic` の一様な世界方位角だけを対象とする．
++- `fixed` 成分は，混合されている場合も平均しない．
++- 入射 ki の x,z が厳密に0の場合だけ適用する．近鉛直を鉛直へ丸めない．
++  `inclinations_deg` の +/-90 は既存 CLI でも厳密な軸方向になる．
++- その他の入射方向は元のコード経路のまま．横方向の模様が物理的な場合もあるため，
++  全入射角の PDF を一律に方位平均することはしない．
++- beta/gamma の求積と単粒子の入射格子補間の誤差は，この修正では消えない．
++- sigma，個数混合比，角度格子，光路打ち切り，CDF 許容誤差は変更しない．
++- 分布に新たな一様散乱成分や PDF floor を加えない．本来ゼロの theta 帯はゼロを保つ．
++
++`coupling()` は元の有限節点積分として残し，合成 CLI は宣言された配向モデルを参照する
++`coupling_for_rule()` を使う．metadata の `orientation.azimuth_integration` に，各成分の
++積分方法と実際の代表姿勢数を記録する．元の配向配列は再現用の参照求積列として残すが，
++鉛直条件では一様 alpha を解析積分したことを，レコードと manifest に明示する．
++`source_sha256` / `generator_version` も更新される．
++
++## 適用・実行
++
++前回配布した M3 を適用済みの作業ツリー向け．変更は5ファイル．
++C++/CUDA/CDF形式は変更しないので再ビルド・atlas再生成は不要．
++GitHub 上に直接 push はしていない．
++
++```bat
++git apply --check ice-crystal-phase-m3-polar-azimuth-hotfix1.patch
++git apply ice-crystal-phase-m3-polar-azimuth-hotfix1.patch
++python -m unittest discover -s hex_atlas\tests -p "test_*.py" -v
++
++python hex_atlas\python\compose_atlas.py --atlas out\atlas_550 --config hex_atlas\configs\horizontal_gaussian.json --out out\deterministic_phase_polar_fixed
++
++python tools\phase_analysis.py inspect out\deterministic_phase_polar_fixed\records\i0006\w0000 --out analysis\m3_polar_fixed --label "M3: vertical incidence, analytic azimuth"
++start "" "analysis\m3_polar_fixed\pdf_log.png"
++```
++
++出力先と `.part` は新しい名前にする．既存データへの上書きを許可しない．
++標準の全7条件 config で生成すると，0--75度の6条件の NPY は旧合成器と同じで，
++90度の条件だけが修正対象になる（数値実行環境が同一の場合）．
++NumPy依存以外に追加依存はない．新しい CTest `ice_atlas_polar_azimuth` の登録には
++`cmake -S . -B build` が必要だが，上記の unittest コマンドには不要．
++
++## 検証の範囲
++
++- 既存11件＋新規8件のPython単体テストを実行．
++- 配布済み CPU atlas から sigma=10/3度，各7入射角，計14レコードを再合成し，
++  Git blob一致を確認した無変更の `PhaseRecord(validate=True)` で検証．
++- 0--75度の6条件のNPYは，同じ環境で実行した旧合成器とバイト一致．
++- +/-鉛直，非鉛直，近鉛直，固定姿勢との混合，未回収光束，ゼロtheta帯を回帰試験．
++- analytic alpha と，出射セルの全循環シフトを含む72点 alpha 求積との一致を検査．
++- 新しいユーザーのCUDA出力NPYは受け取っていない．提示画像の数値をOCRしたものではなく，
++  前回同梱したCPU例のatlasを使った再現である．CUDA実行とWindows実機は未検証．
++- 正規化・再現性だけでは対称性の正しさを検出できなかったため，新たな回帰試験を追加した．
+diff --git a/hex_atlas/python/atlas_math.py b/hex_atlas/python/atlas_math.py
+index e205778..eaaf634 100644
+--- a/hex_atlas/python/atlas_math.py
++++ b/hex_atlas/python/atlas_math.py
+@@ -304,6 +304,93 @@ def coupling(atlas: Atlas, rotations: np.ndarray, number_weights: np.ndarray, ki
+     return w, expected_area, output_frame
+ 
+ 
++
++def coupling_for_rule(atlas: Atlas, rotations: np.ndarray,
++                      number_weights: np.ndarray, ki: Any,
++                      rule_meta: dict[str, Any]
++                      ) -> tuple[np.ndarray, float, np.ndarray, dict[str, Any]]:
++    """Integrate the uniform world-azimuth angle exactly at vertical incidence.
++
++    For R=Ry(alpha) Rz(beta) Ry(gamma) and ki=+/-y, R.T@ki and
++    projected area are independent of alpha. Alpha only cyclically translates
++    outgoing phi. Averaging uniformly over alpha is therefore a constant
++    circular-convolution kernel, exactly for the declared finite-cell atlas
++    reconstruction. Tilt/spin and incident interpolation remain numerical.
++
++    This applies ONLY to declared isotropic/horizontal_gaussian components.
++    Fixed poses are not averaged, even when mixed with a continuous component.
++    Nonvertical directions (including near-vertical ones) use the original rule.
++    The full arrays supplied by orientation_rule are the provenance/reference
++    quadrature. At vertical incidence its redundant alpha nodes are replaced
++    by an analytic orbit integral; the returned diagnostics document this.
++    """
++    k = unit(ki)
++    vertical = bool(k[0] == 0.0 and k[2] == 0.0)
++    config = rule_meta['config']
++    components = config['components']
++    eligible = [c['kind'] in ('isotropic', 'horizontal_gaussian')
++                for c in components]
++    if not vertical or not any(eligible):
++        w, area, f = coupling(atlas, rotations, number_weights, k)
++        return w, area, f, {
++            'method': 'original_fixed_orientation_quadrature',
++            'exact_vertical_incidence': vertical,
++            'analytic_uniform_azimuth_components': [],
++            'effective_pose_evaluations': len(rotations),
++            'symmetry_axis_ensemble': [0, 1, 0],
++            'direction_snapped': False,
++            'output_post_filter': False,
++        }
++
++    # Never infer invariance from a coincidentally symmetric list of poses.
++    # Ensure the model declaration and the supplied provenance arrays agree.
++    reference_rotations, reference_weights, _ = orientation_rule(config)
++    if (not np.array_equal(rotations, reference_rotations) or
++            not np.array_equal(number_weights, reference_weights)):
++        raise ValueError('Analytic azimuth requires the declared orientation_rule arrays')
++    result = np.zeros((atlas.it+1, atlas.ip+1, 2, atlas.np), dtype=np.float64)
++    areas = []
++    evaluations = 0
++    component_modes = []
++    for component, analytic in zip(components, eligible):
++        fraction = float(component['fraction'])
++        one = dict(component, fraction=1.0)
++        quadrature = dict(config['quadrature'])
++        if analytic:
++            # A single representative alpha suffices; its azimuth is immaterial
++            # after integration over the whole uniform orbit.
++            quadrature['azimuth'] = 1
++        r, nw, _ = orientation_rule({'quadrature': quadrature, 'components': [one]})
++        wc, ac, output_frame = coupling(atlas, r, nw, k)
++        if analytic:
++            # Replace the orbit's discrete delta shifts, not the optical model.
++            # For every tilt/spin contribution, integral d alpha/(2*pi) of
++            # an azimuth-shifted cell distributes its mass equally to all phi.
++            orbit_total = np.sum(wc, axis=-1, keepdims=True, dtype=np.float64)
++            wc = np.broadcast_to(orbit_total / atlas.np, wc.shape)
++        result += fraction * wc
++        areas.append(fraction * ac)
++        evaluations += len(r)
++        component_modes.append('analytic_uniform_alpha' if analytic else 'fixed_pose')
++    area = math.fsum(areas)
++    represented = float(np.sum(np.sum(result, axis=(2, 3)) * atlas.area))
++    if (not area > 0 or not np.isfinite(result).all() or np.any(result < 0) or
++            abs(represented/area-1) > 1e-11):
++        raise ValueError('Analytic azimuth coupling failed area audit')
++    return result, area, output_frame, {
++        'method': 'analytic_uniform_world_azimuth_at_vertical_incidence',
++        'exact_vertical_incidence': True,
++        'analytic_uniform_azimuth_components': [i for i, x in enumerate(eligible) if x],
++        'component_methods': component_modes,
++        'reference_pose_count': len(rotations),
++        'effective_pose_evaluations': evaluations,
++        'symmetry_axis_ensemble': [0, 1, 0],
++        'direction_snapped': False,
++        'output_post_filter': False,
++        'tilt_spin_and_atlas_interpolation_remain_numerical': True,
++    }
++
++
+ def compose_mass(atlas: Atlas, weights: np.ndarray) -> tuple[np.ndarray, float]:
+     out = np.zeros((atlas.nt,atlas.np),dtype=np.float64)
+     # Fixed order, nonnegative direct cyclic convolution; no FFT negatives/floor.
+diff --git a/hex_atlas/python/compose_atlas.py b/hex_atlas/python/compose_atlas.py
+index 0325dc7..b721481 100644
+--- a/hex_atlas/python/compose_atlas.py
++++ b/hex_atlas/python/compose_atlas.py
+@@ -14,7 +14,7 @@ import sys
+ import time
+ from typing import Any
+ import numpy as np
+-from atlas_math import (Atlas, compose_mass, coupling, make_cdf, orientation_rule,
++from atlas_math import (Atlas, compose_mass, coupling_for_rule, make_cdf, orientation_rule,
+                         sha256_file, unit)
+ 
+ 
+@@ -62,7 +62,7 @@ def incidents(config: dict[str,Any]) -> list[tuple[np.ndarray,dict[str,Any]]]:
+ 
+ def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
+              f: np.ndarray, plan_hash: str, rule_meta: dict[str,Any], condition: dict[str,Any],
+-             source_hash: str) -> dict[str,Any]:
++             source_hash: str, azimuth_integration: dict[str,Any]) -> dict[str,Any]:
+     g = report['g']; material = a.meta['material']; geom = a.meta['geometry'].copy()
+     geom.update(projected_area_mm2=expected,projected_area_m2=expected*1e-6,
+         projected_area_method='deterministic_orientation_quadrature_of_exact_facet_projection')
+@@ -73,7 +73,7 @@ def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
+         continuous_wave_solution_certified=False,
+         maximum_accepted_l1_mass_error=1e-10,maximum_accepted_lost_probability_mass=1e-12)
+     return dict(schema='rainbow.phase_cdf.numpy.v2',complete=True,
+-        generator_version='ice.deterministic_atlas.m3.v1',backend='numpy_deterministic_atlas_convolution',
++        generator_version='ice.deterministic_atlas.m3.polar_azimuth.v1',backend='numpy_deterministic_atlas_convolution',
+         source_sha256=source_hash,dtype='<f8',order='C',theta_count=a.nt,phi_count=a.np,
+         density_measure='solid_angle_sr',cell_model='constant_density_per_spherical_cell',
+         coordinates='u=(1-cos(theta))/2; v=(phi+pi)/(2*pi)',cdf_axis_order=['phi_cell','theta_edge'],
+@@ -89,7 +89,8 @@ def metadata(a: Atlas, expected: float, residual: float, report: dict[str,Any],
+         single_scattering_albedo=1,stage='incoherent',diffraction_policy=dict(computed=False,selected_output_includes_diffraction=False),
+         inter_path_interference=False,tir_relative_phase_retained=True,
+         orientation=dict(representation='deterministic_SO3_number_quadrature',rule=rule_meta,
+-            plan_sha256=plan_hash,randomness=False,plan_embedded=False,plan_location='dataset_root'),
++            plan_sha256=plan_hash,randomness=False,plan_embedded=False,plan_location='dataset_root',
++            azimuth_integration=azimuth_integration),
+         atlas=dict(files_sha256=a.hashes,incident_theta_intervals=a.it,incident_phi_intervals=a.ip,
+             angular_reconstruction='A_normalized_bilinear_theta_phi_in_incident_spherical_frame',
+             symmetry='D6h_including_reflections',transform='phi_shift_or_phi_reflection_then_shift',
+@@ -111,6 +112,16 @@ def run(atlas_paths: list[Path], config_path: Path, out: Path) -> None:
+     if set(config) - {'orientation','inclinations_deg','directions'} or 'orientation' not in config:
+         raise ValueError('Unknown/missing composition configuration keys')
+     rotations, weights, rule_meta = orientation_rule(config['orientation'])
++    # These arrays remain a reproducible reference quadrature. The actual
++    # per-incident operator, including exact uniform-alpha integration at the
++    # two poles, is identified in each record and in the final batch manifest.
++    rule_meta = dict(rule_meta, vertical_uniform_azimuth_policy={
++        'version': 'analytic_uniform_alpha_at_exact_vertical_v1',
++        'reference_arrays': 'discrete_reference_not_literal_nodes_at_analytic_conditions',
++        'eligible_components': ['horizontal_gaussian', 'isotropic'],
++        'fixed_components_unchanged': True,
++        'nonvertical_conditions_unchanged': True,
++    })
+     incident_list = incidents(config)
+     atlases: list[Atlas] = []
+     part = None
+@@ -144,7 +155,7 @@ def run(atlas_paths: list[Path], config_path: Path, out: Path) -> None:
+         write_json(part/'generation_plan.json',plan)
+         for i,(ki,condition) in enumerate(incident_list):
+             start=time.perf_counter()
+-            c,expected,fr = coupling(first,rotations,weights,ki)
++            c,expected,fr,azimuth_integration = coupling_for_rule(first,rotations,weights,ki,rule_meta)
+             for w,a in enumerate(atlases):
+                 mass,residual = compose_mass(a,c)
+                 total=math.fsum(mass.flat)
+@@ -154,11 +165,12 @@ def run(atlas_paths: list[Path], config_path: Path, out: Path) -> None:
+                 relative=Path('records')/f'i{i:04d}'/f'w{w:04d}'
+                 record=part/relative;record.mkdir(parents=True)
+                 write_npy(record/'phi_cdf.npy',phi);write_npy(record/'theta_given_phi_cdf.npy',theta);write_npy(record/'u_edges.npy',a.edges)
+-                m=metadata(a,expected,residual,report,fr,plan_hash,rule_meta,condition,source_hash)
++                m=metadata(a,expected,residual,report,fr,plan_hash,rule_meta,condition,source_hash,azimuth_integration)
+                 write_json(record/'metadata.json',m)
+                 record_hashes={name:sha256_file(record/name) for name in ('metadata.json','phi_cdf.npy','theta_given_phi_cdf.npy','u_edges.npy')}
+                 plan['records'].append(dict(incident_index=i,wavelength_index=w,path=relative.as_posix(),
+-                    ki=ki.tolist(),wavelength_nm=wavelengths[w],g=report['g'],files_sha256=record_hashes))
++                    ki=ki.tolist(),wavelength_nm=wavelengths[w],g=report['g'],files_sha256=record_hashes,
++                    azimuth_integration=azimuth_integration))
+                 print(f"record i={i} w={w} mass=1 g={report['g']:.17g} A={expected:.17g}")
+             print(f"incident_complete i={i} offline_seconds={time.perf_counter()-start:.6f}")
+         plan['complete']=True
+diff --git a/hex_atlas/tests/test_polar_azimuth.py b/hex_atlas/tests/test_polar_azimuth.py
+new file mode 100644
+index 0000000..bff2ec1
+--- /dev/null
++++ b/hex_atlas/tests/test_polar_azimuth.py
+@@ -0,0 +1,128 @@
++"""Polar-incidence symmetry tests; no CUDA and no optical re-tracing."""
++from pathlib import Path
++import math
++import sys
++import unittest
++import numpy as np
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'python'))
++from atlas_math import (orientation_rule, coupling, coupling_for_rule, compose_mass,
++                        make_cdf, frame)
++from test_compose import fixture
++
++
++def config(na=16):
++    return {'quadrature': {'azimuth': na, 'tilt': 4, 'spin': 3}, 'components': [
++        {'kind': 'horizontal_gaussian', 'sigma_deg': 10, 'fraction': .9},
++        {'kind': 'isotropic', 'fraction': .1}]}
++
++
++def evaluate(a, cfg, ki, analytic=True):
++    r, w, meta = orientation_rule(cfg)
++    if analytic:
++        c, area, f, info = coupling_for_rule(a, r, w, ki, meta)
++    else:
++        c, area, f = coupling(a, r, w, ki)
++        info = {}
++    mass, tail = compose_mass(a, c)
++    return mass, tail, area, f, info
++
++
++class PolarAzimuthTests(unittest.TestCase):
++    def test_both_poles_uniform_phi_without_changing_row_mass(self):
++        a = fixture()
++        a.mass *= .97
++        a.residual = .03 * a.area
++        for sign in (-1, 1):
++            with self.subTest(sign=sign):
++                old, old_tail, old_area, _, _ = evaluate(a, config(), [0, sign, 0], False)
++                new, tail, area, f, info = evaluate(a, config(), [0, sign, 0])
++                expected = np.repeat(old.mean(axis=1, keepdims=True), a.np, axis=1)
++                np.testing.assert_allclose(new, expected, rtol=1e-12, atol=2e-17)
++                np.testing.assert_allclose(new.sum(axis=1), old.sum(axis=1), rtol=1e-12, atol=2e-17)
++                np.testing.assert_allclose(f, frame([0, sign, 0]), rtol=0, atol=0)
++                self.assertAlmostEqual(tail, old_tail, delta=1e-16)
++                self.assertAlmostEqual(area, old_area, delta=1e-15)
++                self.assertAlmostEqual(new.sum() + tail, area, delta=1e-15)
++                self.assertEqual(info['analytic_uniform_azimuth_components'], [0, 1])
++                self.assertEqual(info['effective_pose_evaluations'], 24)
++                self.assertFalse(info['output_post_filter'])
++
++    def test_agrees_with_complete_discrete_cyclic_average(self):
++        a = fixture()
++        a.mass[:] = 0
++        a.mass[:, :, 1, 2] = a.area
++        for sign in (-1, 1):
++            new, *_ = evaluate(a, config(3), [0, sign, 0])
++            reference, *_ = evaluate(a, config(a.np), [0, sign, 0], False)
++            np.testing.assert_allclose(new, reference, rtol=2e-12, atol=3e-17)
++
++    def test_independent_of_requested_alpha_node_count(self):
++        a = fixture()
++        first = evaluate(a, config(1), [0, -1, 0])[0]
++        for na in (2, 7, 16, 23):
++            new, *_ = evaluate(a, config(na), [0, -1, 0])
++            np.testing.assert_array_equal(new, first)
++
++    def test_nonvertical_and_near_vertical_unchanged(self):
++        a = fixture()
++        cfg = config()
++        for ki in ([1, 0, 0], [1, -.7, .2], [1e-13, -1, 0]):
++            with self.subTest(ki=ki):
++                new, tail, area, f, info = evaluate(a, cfg, ki)
++                old, old_tail, old_area, old_f, _ = evaluate(a, cfg, ki, False)
++                np.testing.assert_array_equal(new, old)
++                np.testing.assert_array_equal(f, old_f)
++                self.assertEqual(tail, old_tail)
++                self.assertEqual(area, old_area)
++                self.assertEqual(info['method'], 'original_fixed_orientation_quadrature')
++
++    def test_fixed_pose_unchanged_even_at_vertical(self):
++        a = fixture()
++        cfg = config()
++        cfg['components'] = [{'kind': 'fixed', 'fraction': 1., 'quaternion_wxyz': [1, 0, 0, 0]}]
++        new, *_, info = evaluate(a, cfg, [0, -1, 0])
++        old, *_ = evaluate(a, cfg, [0, -1, 0], False)
++        np.testing.assert_array_equal(new, old)
++        self.assertGreater(float(np.max(np.ptp(new, axis=1))), 0)
++        self.assertEqual(info['analytic_uniform_azimuth_components'], [])
++
++    def test_mixed_fixed_component_not_averaged(self):
++        a = fixture()
++        cfg = config()
++        fixed = {'kind': 'fixed', 'fraction': .4, 'quaternion_wxyz': [1, 0, 0, 0]}
++        iso = {'kind': 'isotropic', 'fraction': .6}
++        cfg['components'] = [fixed, iso]
++        mass, tail, area, _, info = evaluate(a, cfg, [0, -1, 0])
++        pieces = []
++        for comp in (fixed, iso):
++            single = {'quadrature': cfg['quadrature'], 'components': [dict(comp, fraction=1.)]}
++            pieces.append(evaluate(a, single, [0, -1, 0]))
++        np.testing.assert_allclose(mass, .4*pieces[0][0] + .6*pieces[1][0], rtol=2e-12, atol=2e-17)
++        self.assertAlmostEqual(area, .4*pieces[0][2] + .6*pieces[1][2])
++        self.assertEqual(info['analytic_uniform_azimuth_components'], [1])
++        self.assertGreater(float(np.max(np.ptp(mass, axis=1))), 0)
++
++    def test_sparse_distribution_remains_sparse_in_theta_not_phi(self):
++        a = fixture()
++        a.mass[:] = 0
++        a.mass[:, :, 1, 2] = a.area
++        mass, *_ = evaluate(a, config(), [0, -1, 0])
++        self.assertTrue(np.all(mass[1] > 0))
++        np.testing.assert_array_equal(mass[[0, 2, 3]], 0)
++        edges = np.linspace(0, 1, a.nt + 1)
++        ca, cb, report = make_cdf(mass, edges)
++        recovered = (np.diff(ca)[:, None]*np.diff(cb, axis=1)).T
++        np.testing.assert_allclose(recovered, mass/mass.sum(), rtol=1e-13, atol=2e-16)
++        self.assertLess(report['cdf_l1_mass_error'], 1e-12)
++        self.assertEqual(report['cdf_lost_probability_mass'], 0.)
++
++    def test_reject_inconsistent_declared_rule_at_pole(self):
++        a = fixture()
++        r, w, meta = orientation_rule(config())
++        w = w[::-1].copy()
++        with self.assertRaisesRegex(ValueError, 'declared'):
++            coupling_for_rule(a, r, w, [0, -1, 0], meta)
++
++
++if __name__ == '__main__':
++    unittest.main(verbosity=2)

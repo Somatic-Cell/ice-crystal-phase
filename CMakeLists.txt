@@ -178,3 +178,9 @@ option(ICE_BUILD_HEX_PHASE "Build hexagonal crystal orientation/CDF generation" 
 if(ICE_BUILD_HEX_PHASE)
     add_subdirectory(hex_phase)
 endif()
+
+# M3: reusable single-particle response atlas and deterministic orientation composition.
+option(ICE_BUILD_HEX_ATLAS "Build deterministic single-particle atlas tools" ON)
+if(ICE_BUILD_HEX_ATLAS)
+    add_subdirectory(hex_atlas)
+endif()
